@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {mkdtemp,writeFile,mkdir,readdir,readFile} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+const moduleRoot=fileURLToPath(new URL('..',import.meta.url));
+const jar=path.join(moduleRoot,'target/fg-sql-migration-1.0.0-SNAPSHOT.jar');
+const work=await mkdtemp(path.join(moduleRoot,'target/cli-smoke-'));
+function run(...args){return spawnSync('java',['-jar',jar,'cli',...args],{cwd:work,encoding:'utf8',timeout:30000});}
+let result=run('help');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/No web server/);assert.doesNotMatch(result.stdout,/Tomcat|Spring Boot/);
+result=run('init','--output','migration.json');assert.equal(result.status,0,result.stdout);
+const config=JSON.parse(await readFile(path.join(work,'migration.json'),'utf8'));assert.equal(config.source.passwordEnv,'SOURCE_DB_PASSWORD');
+await mkdir(path.join(work,'input'));
+for(let i=1;i<=10;i++)await writeFile(path.join(work,'input',String(i).padStart(2,'0')+'.sql'),`CREATE TABLE t${i} (id NUMBER(10)); INSERT INTO t${i} VALUES (${i});`);
+await writeFile(path.join(work,'convert.json'),JSON.stringify({input:'input',sourceDialect:'ORACLE',targetDialect:'POSTGRESQL',targetSchema:'public'}));
+result=run('convert','--config','convert.json','--output','reports');assert.equal(result.status,0,result.stdout+result.stderr);
+const entries=await readdir(path.join(work,'reports'));assert.equal(entries.length,1);
+const report=JSON.parse(await readFile(path.join(work,'reports',entries[0],'preflight.json'),'utf8'));assert.equal(report.tables.length,10);assert.equal(report.issues.length,0);
+assert.ok((await readFile(path.join(work,'reports',entries[0],'migration.zip'))).length>0);
+result=run('migrate','--config','convert.json');assert.equal(result.status,2,result.stdout);
+console.log('Executable JAR CLI passed: help, generated configuration, 10-file conversion, reports/ZIP, blocked migration without target, no web server.');

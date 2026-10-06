@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import {readFile,writeFile} from 'node:fs/promises';
+
+const base=process.env.MIGRATION_URL||'http://127.0.0.1:8098';
+const headers={'Content-Type':'application/json','X-Migration-Client':'migration-ui'};
+const sql=await readFile(new URL('../src/test/resources/oracle-edge-cases.sql',import.meta.url),'utf8');
+const response=await fetch(base+'/api/plans',{method:'POST',headers,body:JSON.stringify({sourceDialect:'ORACLE',targetDialect:'POSTGRESQL',targetSchema:'fg_solutions',sql})});
+assert.equal(response.status,200);const report=await response.json();
+assert.equal(report.orderedScript,true);assert.equal(report.statements.length,63);assert.equal(report.issues.length,3);
+assert.equal(report.statements.filter(s=>s.convertedSql).length,60);
+const preview=await fetch(base+`/api/plans/${report.id}/preview`);assert.equal(preview.status,200);const converted=await preview.text();
+assert.match(converted,/MANUAL CORRECTION REQUIRED/);assert.match(converted,/decode\('A1B2C3D4', 'hex'\)/);assert.match(converted,/விக்னேஷ்/);
+const archive=await fetch(base+`/api/plans/${report.id}/download`,{method:'POST',headers,body:'{}'});assert.equal(archive.status,200);
+const bytes=new Uint8Array(await archive.arrayBuffer());assert.equal(bytes[0],0x50);assert.equal(bytes[1],0x4b);
+await writeFile(new URL('../target/Test_Script.postgresql.review.sql',import.meta.url),converted,'utf8');
+await writeFile(new URL('../target/Test_Script.postgresql.report.json',import.meta.url),JSON.stringify(report,null,2),'utf8');
+await writeFile(new URL('../target/Test_Script.postgresql.review.zip',import.meta.url),bytes);
+console.log('HTTP edge-case smoke passed: 63 statements, 60 translated, 3 genuine source errors; ordered preview and ZIP verified.');
+console.log('Review SQL, report and ZIP saved under fg-sql-migration/target/Test_Script.postgresql.*');
+const cleanup=await fetch(base+`/api/plans/${report.id}`,{method:'DELETE',headers});assert.equal(cleanup.status,200);

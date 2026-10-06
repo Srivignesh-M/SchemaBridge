@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SchemaBridge</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<body>
+<header><a class="brand" href="/">S<span>↗</span></a><div><strong>SchemaBridge</strong><span class="sub">SQL Migration Studio</span></div><span class="local">LOCAL WORKSPACE</span></header>
+<main>
+<div class="intro"><span class="eyebrow">DATABASE TOOLS / MIGRATION</span><h1>Move your schema.<br><span>Keep control of your data.</span></h1><p>Convert Oracle and PostgreSQL scripts, compare target tables, and choose exactly what runs.</p></div>
+<div class="steps"><span class="active">01 &nbsp; Configure</span><span>02 &nbsp; Review compatibility</span><span>03 &nbsp; Export or execute</span></div>
+<form id="configuration">
+<section class="card"><div class="section-title"><h2>Choose a workflow</h2><span class="tag">Oracle ↔ PostgreSQL</span></div>
+<div class="flows">
+<label><input type="radio" name="flow" value="files-download" checked><strong>SQL → download</strong><small>Convert uploaded scripts</small></label>
+<label><input type="radio" name="flow" value="files-db"><strong>SQL → database</strong><small>Convert and run a selected plan</small></label>
+<label><input type="radio" name="flow" value="db-download"><strong>Database → download</strong><small>Export selected tables</small></label>
+<label><input type="radio" name="flow" value="db-db"><strong>Database → database</strong><small>Clone structure and data</small></label>
+</div></section>
+<div class="two-col">
+<section class="card"><h2>Source</h2><label>SQL dialect<select id="sourceDialect"><option value="ORACLE">Oracle</option><option value="POSTGRESQL">PostgreSQL</option></select></label>
+<div id="sourceConnection" hidden></div>
+<div id="filesInput"><label class="upload">Upload SQL files<input id="files" type="file" accept=".sql,.ddl,.dml,.txt" multiple></label><label class="upload">Or choose a folder<input id="folder" type="file" webkitdirectory multiple><small>Includes subfolders · .sql, .ddl, .dml and .txt files · UTF-8 · 10 MB total</small></label><p class="muted">Files are combined into one conversion in filename/path order (1, 2, … 10). Use prefixes such as 01-schema.sql and 02-data.sql to put definitions before data. All files must use the selected source dialect. Choosing files or a folder replaces the current SQL input.</p><p id="fileNames" class="muted"></p><label>Combined SQL script<textarea id="sql" rows="12" spellcheck="false" placeholder="CREATE TABLE customers (id NUMBER(10) PRIMARY KEY, name VARCHAR2(100));"></textarea></label><button type="button" id="example" class="secondary">Load example</button></div>
+<div id="tableSelection" hidden><label>Tables<select id="sourceTables" multiple size="7"></select></label><small>Use Ctrl / Cmd to select multiple tables.</small><button type="button" id="configureColumns" class="secondary">Choose columns and row filters</button><div id="columnOptions"></div><label class="inline"><input id="includeData" type="checkbox" checked>Include table data</label></div>
+</section>
+<section class="card"><h2>Destination</h2><label>SQL dialect<select id="targetDialect"><option value="POSTGRESQL">PostgreSQL</option><option value="ORACLE">Oracle</option></select></label>
+<label>Target schema<input id="targetSchema" value="public" required maxlength="128" list="targetSchemas"><datalist id="targetSchemas"></datalist></label>
+<div id="targetConnection" hidden></div>
+<div class="note"><strong>Every table gets an explicit action.</strong><p>Existing tables are compared by columns, converted types, defaults and constraints. Matching tables can receive DML only. Mismatched tables remain skipped.</p></div>
+<div class="note"><strong>Supported first release</strong><p>CREATE TABLE, literal INSERT values, primary/unique/foreign keys, common numeric, character and date/time types. Unsupported syntax is reported and blocks executable output.</p><p>Data loading is insert-only. Duplicate keys fail; existing rows are never silently replaced.</p></div>
+</section></div>
+<section class="card"><details><summary>Transfer settings</summary><div class="two-col">
+<label>Maximum rows<input id="maxRows" type="number" min="1" max="1000000000" value="2000000"></label>
+<label>Maximum exported GB per table<input id="maxTableGb" type="number" min="0.001" step="0.001" max="1000" value="10"></label>
+<label>Keep free disk space (MB)<input id="diskReserveMb" type="number" min="0" value="256"></label>
+<label>Rows fetched per request<input id="fetchSize" type="number" min="1" max="10000" value="1000"></label>
+<label>Rows per insert batch<input id="batchRows" type="number" min="1" max="10000" value="1000"></label>
+<label>Maximum batch MB<input id="batchMb" type="number" min="0.01" max="64" step="0.01" value="4"></label>
+<label>Query timeout (seconds)<input id="queryTimeout" type="number" min="1" max="86400" value="1800"></label>
+<label>Connection read timeout (seconds)<input id="readTimeout" type="number" min="1" max="86400" value="1800"></label>
+</div><label class="inline"><input id="validateData" type="checkbox" checked>Verify transferred data before committing each table</label>
+<label class="inline"><input id="useCopy" type="checkbox">Use PostgreSQL bulk loading (COPY) for database sources</label>
+<p class="muted">Validation adds read time. Completed tables are retained after a later failure. A higher row limit is not a guarantee for every table shape.</p></details></section>
+<div class="action-bar"><span id="configStatus" role="status">Configure a source to begin.</span><button id="analyse" type="submit">Analyse migration <span>→</span></button></div>
+</form>
+<section id="reportSection" class="card" hidden><div class="section-title"><div><span class="eyebrow">PREFLIGHT REPORT</span><h2 id="reportTitle">Review every table</h2></div><button id="matchAll" class="secondary">DML only for all matches</button></div><div id="reportMessages"></div><div id="statementSection" hidden><p id="statementSummary"></p><div class="table-scroll"><table><thead><tr><th>Statement</th><th>Type</th><th>Conversion status</th><th>Findings</th></tr></thead><tbody id="statementRows"></tbody></table></div></div><div class="table-scroll" id="tableReport"><table><thead><tr><th>Table</th><th>Target status</th><th>Rows</th><th>Findings</th><th>Action</th></tr></thead><tbody id="reportRows"></tbody></table></div><details><summary id="previewTitle">Preview converted table definitions</summary><pre id="preview"></pre></details><div class="action-bar"><button id="reportDownload" class="secondary">Download report</button><div><button id="prepareData" class="secondary" hidden>Prepare table data</button><button id="download" class="secondary">Download SQL package</button><button id="execute">Run selected plan</button></div></div><p class="muted" id="executionNote">Run selected plan writes to the inspected target database. DDL and previously committed tables can remain after failure. Prepared plans are retained for 30 days; submitted jobs are retained until explicitly deleted.</p></section>
+<section id="preparationSection" class="card" hidden><h2>Preparing data</h2><p id="preparationState" role="status"></p><button id="cancelPreparation" class="secondary">Cancel preparation</button></section>
+<section id="jobSection" class="card" hidden><div class="section-title"><h2>Execution report</h2><button id="jobDownload" class="secondary">Download final report</button></div><p id="jobState" role="status"></p><p id="jobProgress" role="status"></p><button id="cancelJob" class="secondary">Cancel migration</button><button id="resumeJob" class="secondary" hidden>Resume with current target connection</button><div class="table-scroll"><table><thead><tr><th>Table</th><th>Action</th><th>Status</th><th>Committed rows</th><th>Details</th></tr></thead><tbody id="jobRows"></tbody></table></div></section>
+<section class="card"><div class="section-title"><h2>Saved migration history</h2><button id="refreshHistory" class="secondary">Refresh history</button></div><p class="muted">Passwords are not saved. To resume, enter the original target connection. Interrupted jobs with an uncertain commit require target reconciliation.</p><div id="jobHistory"></div></section>
+<div id="error" role="alert" hidden></div>
+<footer>SchemaBridge · Local single-user application · Credentials are kept out of reports</footer>
+</main></body></html>
