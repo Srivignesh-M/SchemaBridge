@@ -7,6 +7,7 @@ import java.nio.file.*;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.lang.reflect.*;
 import static com.fingress.migration.Model.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -118,5 +119,69 @@ class TransferFeaturesTest {
         service.close();service=new MigrationService(slow,json,directory.toString(),2_000_000,30);PlanView p=plan();JobView job=service.execute(p.id(),new ExecuteRequest(target,Map.of("items",Action.CREATE_AND_LOAD)));
         assertTrue(inBatch.await(10,TimeUnit.SECONDS));service.cancel(job.id());release.countDown();job=await(job);assertEquals("CANCELLED",job.state(),job.message());assertEquals(0,count("items"));assertEquals(0,job.progress().rowsCommitted());
         job=await(service.resume(job.id(),target));assertEquals("SUCCEEDED",job.state(),job.message());assertEquals(2500,count("items"));
+    }
+    @Test void commitResponseFailureRequiresReconciliationAndCannotBeReplayed()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");sql(targetUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY)");
+        AtomicBoolean failCommitResponse=new AtomicBoolean();DatabaseGateway uncertainCommit=new DatabaseGateway(){
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException {
+                Connection raw=db.connect(spec);if(!spec.host().equals("target"))return raw;
+                return (Connection)Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{Connection.class},(proxy,method,args)->{
+                    try{Object result=method.invoke(raw,args);if(method.getName().equals("commit")&&failCommitResponse.compareAndSet(true,false))throw new SQLException("Injected lost commit response");return result;}
+                    catch(InvocationTargetException failure){throw failure.getCause();}
+                });
+            }
+        };
+        service.close();service=new MigrationService(uncertainCommit,json,directory.toString(),2_000_000,30);
+        PlanView plan=plan();failCommitResponse.set(true);
+        JobView job=await(service.execute(plan.id(),new ExecuteRequest(target,Map.of("items",Action.DML_ONLY))));
+        assertEquals("RECOVERY_REQUIRED",job.state(),job.message());assertFalse(job.resumable());
+        assertEquals(1,count("items"));assertEquals(0,job.progress().rowsCommitted());
+        assertThrows(IllegalArgumentException.class,()->service.resume(job.id(),target));
+    }
+    @Test void failedBatchAndRollbackRequireReconciliation()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");sql(targetUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY)");
+        AtomicBoolean failBatchResponse=new AtomicBoolean(),failRollback=new AtomicBoolean();DatabaseGateway base=db;DatabaseGateway failedRollback=new DatabaseGateway(){
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException {
+                Connection raw=base.connect(spec);if(!spec.host().equals("target"))return raw;
+                return (Connection)Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{Connection.class},(proxy,method,args)->{
+                    if(method.getName().equals("rollback")&&failRollback.compareAndSet(true,false))throw new SQLException("Injected rollback failure");
+                    try{Object result=method.invoke(raw,args);if(method.getName().equals("prepareStatement")&&args[0].toString().startsWith("INSERT INTO")){
+                        PreparedStatement statement=(PreparedStatement)result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{PreparedStatement.class},(prepared,operation,parameters)->{
+                            try{Object value=operation.invoke(statement,parameters);if(operation.getName().equals("executeBatch")&&failBatchResponse.compareAndSet(true,false))throw new SQLException("Injected lost batch response");return value;}
+                            catch(InvocationTargetException failure){throw failure.getCause();}
+                        });
+                    }return result;}catch(InvocationTargetException failure){throw failure.getCause();}
+                });
+            }
+        };
+        service.close();service=new MigrationService(failedRollback,json,directory.toString(),2_000_000,30);
+        PlanView plan=plan();failBatchResponse.set(true);failRollback.set(true);
+        JobView job=await(service.execute(plan.id(),new ExecuteRequest(target,Map.of("items",Action.DML_ONLY))));
+        assertEquals("RECOVERY_REQUIRED",job.state(),job.message());assertFalse(job.resumable());
+        assertEquals(0,count("items"));assertEquals(0,job.progress().rowsCommitted());
+        assertThrows(IllegalArgumentException.class,()->service.resume(job.id(),target));
+    }
+    @Test void preCommitBatchFailureRollsBackAndCanSafelyResume()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");sql(targetUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY)");
+        AtomicBoolean failFirstBatch=new AtomicBoolean();DatabaseGateway base=db;DatabaseGateway failedBatch=new DatabaseGateway(){
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException {
+                Connection raw=base.connect(spec);if(!spec.host().equals("target"))return raw;
+                return (Connection)Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{Connection.class},(proxy,method,args)->{
+                    try{Object result=method.invoke(raw,args);if(method.getName().equals("prepareStatement")&&args[0].toString().startsWith("INSERT INTO")){
+                        PreparedStatement statement=(PreparedStatement)result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{PreparedStatement.class},(prepared,operation,parameters)->{
+                            if(operation.getName().equals("executeBatch")&&failFirstBatch.compareAndSet(true,false))throw new SQLException("Injected pre-commit disconnect");
+                            try{return operation.invoke(statement,parameters);}catch(InvocationTargetException failure){throw failure.getCause();}
+                        });
+                    }return result;}catch(InvocationTargetException failure){throw failure.getCause();}
+                });
+            }
+        };
+        service.close();service=new MigrationService(failedBatch,json,directory.toString(),2_000_000,30);
+        PlanView plan=plan();failFirstBatch.set(true);
+        JobView job=await(service.execute(plan.id(),new ExecuteRequest(target,Map.of("items",Action.DML_ONLY))));
+        assertEquals("FAILED",job.state(),job.message());assertTrue(job.resumable());assertEquals(0,count("items"));
+        job=await(service.resume(job.id(),target));assertEquals("SUCCEEDED",job.state(),job.message());assertEquals(1,count("items"));
     }
 }
