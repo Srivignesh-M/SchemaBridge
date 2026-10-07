@@ -8,6 +8,7 @@ import java.sql.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.lang.reflect.*;
 import static com.fingress.migration.Model.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -91,9 +92,60 @@ class TransferFeaturesTest {
     }
     @Test void uncertainRestartCannotBeReplayedAndWorkFolderHasExclusiveOwner()throws Exception {
         assertThrows(java.io.IOException.class,()->new MigrationService(db,json,directory.toString(),100,30));
-        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");PlanView p=plan();JobView job=run(p,Action.CREATE_AND_LOAD);service.close();
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");PlanView p=plan();assertTrue(p.warnings().stream().anyMatch(w->w.contains("extraction cannot resume")));JobView job=run(p,Action.CREATE_AND_LOAD);assertEquals(1,job.progress().rowsCommitted());service.close();
         Path manifest=directory.resolve(p.id()).resolve("job.json");var node=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(Files.readString(manifest));((com.fasterxml.jackson.databind.node.ObjectNode)node.get("view")).put("state","RUNNING");Files.writeString(manifest,json.writeValueAsString(node));
-        service=new MigrationService(db,json,directory.toString(),100,30);assertEquals("RECOVERY_REQUIRED",service.job(job.id()).state());assertFalse(service.job(job.id()).resumable());assertThrows(IllegalArgumentException.class,()->service.resume(job.id(),target));assertEquals(1,count("items"));
+        service=new MigrationService(db,json,directory.toString(),100,30);JobView recovered=service.job(job.id());assertEquals("RECOVERY_REQUIRED",recovered.state());assertEquals(1,recovered.progress().rowsCommitted());assertFalse(recovered.resumable());assertThrows(IllegalArgumentException.class,()->service.resume(job.id(),target));assertEquals(1,count("items"));
+    }
+    @Test void abruptProcessExitAfterCommitRestoresAsUncertainWithoutReplay()throws Exception {
+        String sourceFileUrl="jdbc:h2:file:"+directory.resolve("crash-source").toAbsolutePath()+";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;WRITE_DELAY=0";
+        String targetFileUrl="jdbc:h2:file:"+directory.resolve("crash-target").toAbsolutePath()+";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;WRITE_DELAY=0";
+        sql(sourceFileUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(7)");
+        try(Connection ignored=DriverManager.getConnection(targetFileUrl)){}
+        Path work=directory.resolve("crash-work");service.close();
+        String java=Path.of(System.getProperty("java.home"),"bin",System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win")?"java.exe":"java").toString();
+        Path childLog=directory.resolve("abrupt-child.log");
+        Process child=new ProcessBuilder(java,"-cp",System.getProperty("java.class.path"),AbruptTerminationChild.class.getName(),work.toString(),sourceFileUrl,targetFileUrl)
+                .redirectErrorStream(true).redirectOutput(childLog.toFile()).start();
+        if(!child.waitFor(30,TimeUnit.SECONDS)){child.destroyForcibly();fail("Crash fixture process did not exit");}
+        assertEquals(77,child.exitValue(),"child must halt immediately after the data commit: "+Files.readString(childLog));
+        DatabaseGateway fileDatabases=new DatabaseGateway(){
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException{return DriverManager.getConnection(spec.host().equals("source")?sourceFileUrl:targetFileUrl);}
+        };
+        service=new MigrationService(fileDatabases,json,work.toString(),100,10);
+        Path planDirectory;
+        try(var saved=Files.list(work)){planDirectory=saved.filter(Files::isDirectory).filter(path->Files.exists(path.resolve("job.json"))).findFirst().orElseThrow();}
+        String jobId=json.readTree(Files.readString(planDirectory.resolve("job.json"))).path("view").path("id").asText();
+        JobView recovered=service.job(jobId);assertEquals("RECOVERY_REQUIRED",recovered.state());assertEquals(0,recovered.progress().rowsCommitted());assertFalse(recovered.resumable());
+        long targetRows;
+        try{targetRows=countIn(targetFileUrl,"items");}catch(SQLException error){fail("Target database read failed; child log: "+Files.readString(childLog),error);return;}
+        assertEquals(1,targetRows,"the target commit completed before the process stopped; child log: "+Files.readString(childLog));
+        assertThrows(IllegalArgumentException.class,()->service.resume(jobId,target));
+    }
+    long countIn(String url,String table)throws Exception{try(Connection c=DriverManager.getConnection(url);Statement s=c.createStatement();ResultSet r=s.executeQuery("SELECT COUNT(*) FROM "+table)){r.next();return r.getLong(1);}}
+    @Test void postLoadFailureResumesWithoutReloadingCommittedRows()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER NOT NULL)");sql(sourceUrl,"CREATE INDEX source_items_id ON items(id)");sql(sourceUrl,"INSERT INTO items VALUES(1)");
+        AtomicBoolean failIndex=new AtomicBoolean();DatabaseGateway failedPostLoad=new DatabaseGateway(){
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException{
+                Connection raw=db.connect(spec);if(!spec.host().equals("target"))return raw;
+                return (Connection)Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{Connection.class},(proxy,method,args)->{
+                    try{Object result=method.invoke(raw,args);if(method.getName().equals("createStatement")){
+                        Statement statement=(Statement)result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{Statement.class},(s,m,a)->{
+                            if(m.getName().equals("execute")&&a!=null&&a.length>0&&a[0] instanceof String sql&&sql.startsWith("CREATE INDEX")&&failIndex.compareAndSet(true,false))throw new SQLException("Injected post-load disconnect");
+                            try{return m.invoke(statement,a);}catch(InvocationTargetException e){throw e.getCause();}
+                        });
+                    }return result;}catch(InvocationTargetException e){throw e.getCause();}
+                });
+            }
+        };
+        service.close();service=new MigrationService(failedPostLoad,json,directory.toString(),2_000_000,30);
+        PlanView p=plan();assertTrue(p.issues().isEmpty(),p.issues().toString());failIndex.set(true);
+        JobView job=await(service.execute(p.id(),new ExecuteRequest(target,Map.of("items",Action.CREATE_AND_LOAD))));
+        assertEquals("FAILED",job.state(),job.message());assertTrue(job.resumable());assertEquals(1,job.progress().rowsCommitted());assertEquals(1,count("items"));
+        job=await(service.resume(job.id(),target));assertEquals("SUCCEEDED",job.state(),job.message());assertEquals(1,count("items"));
+        try(Connection c=DriverManager.getConnection(targetUrl);ResultSet indexes=c.getMetaData().getIndexInfo(c.getCatalog(),"public","items",false,false)){
+            assertTrue(indexes.next(),"post-load index should be created by the resumed finalization");
+        }
     }
     @Test void corruptedStagingCannotWriteAndQuotasDoNotTruncate()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1),(2)");
@@ -103,6 +155,22 @@ class TransferFeaturesTest {
         PlanView p=plan();Files.writeString(directory.resolve(p.id()).resolve("data-0.rows"),"tampered");JobView job=run(p,Action.CREATE_AND_LOAD);assertEquals("FAILED",job.state());assertTrue(job.message().contains("changed"));assertThrows(SQLException.class,()->count("items"));
         options=new MigrationOptions(null,10L,0L,null,null,null,null,null,null,null);assertFalse(service.create(request(false,Map.of(),options)).issues().isEmpty());
         var disk=new MigrationOptions(null,null,Long.MAX_VALUE,null,null,null,null,null,null,null);assertThrows(java.io.IOException.class,()->service.create(request(false,Map.of(),disk)));
+    }
+    @Test void diskReserveExhaustionDuringLobStagingRemovesIncompleteArtifacts()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY, note CLOB)");
+        try(Connection c=DriverManager.getConnection(sourceUrl);PreparedStatement s=c.prepareStatement("INSERT INTO items VALUES(?,?)")){
+            s.setInt(1,1);s.setString(2,"x".repeat(200_000));s.executeUpdate();
+        }
+        AtomicInteger probes=new AtomicInteger();DatabaseGateway constrainedDisk=new DatabaseGateway(){
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException{return DriverManager.getConnection(spec.host().equals("source")?sourceUrl:targetUrl);}
+            @Override protected RowStore.DiskSpaceProbe diskSpaceProbe(){return path->probes.incrementAndGet()==1?Long.MAX_VALUE:0L;}
+        };
+        service.close();service=new MigrationService(constrainedDisk,json,directory.toString(),2_000_000,30);
+        MigrationOptions options=new MigrationOptions(null,null,1L,null,null,null,null,null,null,null);
+        assertThrows(java.io.IOException.class,()->service.create(request(false,Map.of(),options)));
+        assertTrue(probes.get()>=2,"reserve probe should run while writing the LOB sidecar");
+        try(var files=Files.list(directory)){assertEquals(0,files.filter(Files::isDirectory).count(),"failed extraction must erase its partial plan and LOB files");}
+        assertThrows(IllegalArgumentException.class,()->service.view(UUID.randomUUID().toString()));
     }
     @Test void cancellationRollsBackCurrentTableAndAllowsSafeResume()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items SELECT * FROM SYSTEM_RANGE(1,2500)");

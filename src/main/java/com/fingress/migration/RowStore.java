@@ -15,7 +15,9 @@ import static com.fingress.migration.Model.*;
 final class RowStore {
     static final ObjectMapper JSON = new ObjectMapper();
     record Cell(String type, String value, String file) {}
-    static Cell[] read(ResultSet rs, Table source, Dialect target, Path directory, MigrationOptions options, TransferProgress progress) throws Exception {
+    @FunctionalInterface interface DiskSpaceProbe { long usableSpace(Path path) throws IOException; }
+    static final DiskSpaceProbe SYSTEM_DISK_SPACE = path -> Files.getFileStore(path).getUsableSpace();
+    static Cell[] read(ResultSet rs, Table source, Dialect target, Path directory, MigrationOptions options, TransferProgress progress, DiskSpaceProbe diskSpace) throws Exception {
         Cell[] row = new Cell[source.columns().size()];
         for (int i=0;i<row.length;i++) {
             String kind = source.columns().get(i).type().kind(); int index=i+1;
@@ -27,7 +29,7 @@ final class RowStore {
                     try(input){
                         byte[] prefix=input.readNBytes(8193);
                         if(prefix.length<=8192){row[i]=new Cell(kind,Base64.getEncoder().encodeToString(prefix),null);continue;}
-                        try(OutputStream out=Files.newOutputStream(path)){out.write(prefix);copy(input,out,path,options,progress);}
+                        try(OutputStream out=Files.newOutputStream(path)){out.write(prefix);copy(input,out,path,options,progress,diskSpace);}
                     }
                 } else {
                     Reader input=rs.getCharacterStream(index);
@@ -46,7 +48,7 @@ final class RowStore {
                             for(int x=0;x<n;x++)if(buffer[x]=='\0')throw new IllegalArgumentException("NUL text is not portable between databases");
                             out.write(buffer,0,n);size+=n;
                             if(size>options.maxTableBytes())throw new IllegalArgumentException("LOB exceeds configured size limit");
-                            if(size%65536<8192){out.flush();checkDisk(path,options);}
+                            if(size%65536<8192){out.flush();checkDisk(path,options,diskSpace);}
                         }
                         }
                     }
@@ -69,12 +71,15 @@ final class RowStore {
         }
         return row;
     }
-    private static void copy(InputStream input,OutputStream out,Path path,MigrationOptions options,TransferProgress progress)throws IOException {
+    private static void copy(InputStream input,OutputStream out,Path path,MigrationOptions options,TransferProgress progress,DiskSpaceProbe diskSpace)throws IOException {
         byte[] bytes=new byte[65536];int n;long total=0;
-        while((n=input.read(bytes))!=-1){progress.check();total+=n;if(total>options.maxTableBytes())throw new IllegalArgumentException("LOB exceeds configured size limit");out.write(bytes,0,n);checkDisk(path,options);}
+        while((n=input.read(bytes))!=-1){progress.check();total+=n;if(total>options.maxTableBytes())throw new IllegalArgumentException("LOB exceeds configured size limit");out.write(bytes,0,n);checkDisk(path,options,diskSpace);}
     }
     static void checkDisk(Path path,MigrationOptions options)throws IOException {
-        if(Files.getFileStore(path).getUsableSpace()<options.diskReserveBytes())throw new IOException("Disk reserve reached");
+        checkDisk(path,options,SYSTEM_DISK_SPACE);
+    }
+    static void checkDisk(Path path,MigrationOptions options,DiskSpaceProbe diskSpace)throws IOException {
+        if(diskSpace.usableSpace(path)<options.diskReserveBytes())throw new IOException("Disk reserve reached");
     }
     static Path sidecar(Path directory,String name) {
         if(name==null || !name.matches("lob-[a-f0-9-]{36}"))throw new IllegalArgumentException("Invalid LOB reference");

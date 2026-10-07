@@ -205,25 +205,27 @@ public class DatabaseGateway {
                      Path path,long limit,MigrationOptions options,TransferProgress progress)throws Exception {
         long rows=0,bytes=0;List<Object> values=new ArrayList<>();
         String query="SELECT "+SqlWriter.names(source.columns().stream().map(Column::name).toList(),sourceDialect)+" FROM "+qualified(schema,source.name(),sourceDialect)+TableProjection.where(filterTable,selection,sourceDialect,values);
-        Files.createFile(path);RowStore.checkDisk(path,options);
+        Files.createFile(path);checkDisk(path,options);
         try(PreparedStatement statement=c.prepareStatement(query);BufferedWriter writer=Files.newBufferedWriter(path)){
             progress.statement=statement;statement.setFetchSize(options.fetchSize());statement.setQueryTimeout(options.queryTimeoutSeconds());
             for(int i=0;i<values.size();i++)statement.setObject(i+1,values.get(i));
             try(ResultSet rs=statement.executeQuery()){
                 while(rs.next()){
                     progress.check();if(++rows>limit)throw new IllegalArgumentException("Data exceeds configured row limit");
-                    RowStore.Cell[] row=RowStore.read(rs,source,targetDialect,path.getParent(),options,progress);
+                    RowStore.Cell[] row=RowStore.read(rs,source,targetDialect,path.getParent(),options,progress,diskSpaceProbe());
                     String line=RowStore.JSON.writeValueAsString(row);long length=line.getBytes(java.nio.charset.StandardCharsets.UTF_8).length+1;
                     for(RowStore.Cell cell:row)if(cell.file()!=null)length+=Files.size(RowStore.sidecar(path.getParent(),cell.file()));
                     bytes+=length;if(bytes>options.maxTableBytes())throw new IllegalArgumentException("Export exceeds configured per-table byte limit");
                     writer.write(line);writer.newLine();progress.rowsRead++;progress.bytes+=length;
-                    if(rows%options.fetchSize()==0){writer.flush();RowStore.checkDisk(path,options);}
+                    if(rows%options.fetchSize()==0){writer.flush();checkDisk(path,options);}
                 }
             }
-            writer.flush();RowStore.checkDisk(path,options);
+            writer.flush();checkDisk(path,options);
         }finally{progress.statement=null;}
         return rows;
     }
+    protected RowStore.DiskSpaceProbe diskSpaceProbe() { return RowStore.SYSTEM_DISK_SPACE; }
+    private void checkDisk(Path path,MigrationOptions options)throws IOException { RowStore.checkDisk(path,options,diskSpaceProbe()); }
     private Value literal(ResultSet rs, int index, Type type, Dialect target) throws SQLException {
         Object object = rs.getObject(index); if (object == null) return new Value("NULL");
         if (Set.of("DECIMAL", "INTEGER", "SMALLINT", "BIGINT").contains(type.kind())) return new Value(rs.getBigDecimal(index).toPlainString());

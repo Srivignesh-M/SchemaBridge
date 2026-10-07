@@ -161,7 +161,7 @@ function renderPlan() {
   }
   for (const [messages, kind] of [[plan.issues,'issue'],[plan.warnings,'warning']]) for (const text of messages) { const p = document.createElement('p'); p.className = 'message ' + kind; p.textContent = text; $('reportMessages').append(p); }
   for (const table of plan.tables) {
-    const tr = document.createElement('tr'); cell(tr,table.table); const status = cell(tr,''); const badge = document.createElement('span'); badge.className = 'badge ' + table.status; badge.textContent = ({NEW:'New table',MATCH:'Already exists · match',MISMATCH:'Already exists / review',UNCHECKED:'Not inspected'})[table.status]; status.append(badge); const rowSummary=plan.prepared===false?(table.estimatedRows==null?'Not extracted; estimate unavailable':`~${table.estimatedRows.toLocaleString()} source rows estimated`):table.rows; cell(tr,rowSummary);
+    const tr = document.createElement('tr'); cell(tr,table.table); const status = cell(tr,''); const badge = document.createElement('span'); badge.className = 'badge ' + table.status; badge.textContent = ({NEW:'New table',MATCH:'Already exists · match',MISMATCH:'Already exists / review',UNCHECKED:'Not inspected'})[table.status]; status.append(badge); const rowSummary=plan.prepared===false?(table.estimatedRows==null?'Not extracted; estimate unavailable':`~${table.estimatedRows.toLocaleString()} estimated (not extracted)`):`${table.rows.toLocaleString()} extracted`; cell(tr,rowSummary);
     cell(tr,[...table.differences,...table.warnings].join(' · ') || (table.status === 'MATCH' ? 'Definitions match. DML-only is available.' : 'Ready for selected action.'));
     const td = cell(tr,''); const select = document.createElement('select'); select.dataset.table = table.table;
     for(const action of table.allowedActions) { const option = document.createElement('option'); option.value = action; option.textContent = ({CREATE_AND_LOAD:'Create + load',DML_ONLY:'DML only',SKIP:'Skip table'})[action]; select.append(option); }
@@ -171,23 +171,29 @@ function renderPlan() {
 }
 function actions() { return plan?.orderedScript ? {} : Object.fromEntries(Array.from($('reportRows').querySelectorAll('select')).map(select => [select.dataset.table,select.value])); }
 $('matchAll').addEventListener('click', () => $('reportRows').querySelectorAll('select').forEach(select => { if (Array.from(select.options).some(o=>o.value==='DML_ONLY')) select.value='DML_ONLY'; }));
+function clearDownloadLink(){const panel=$('downloadHelp'),link=$('downloadLink');panel.hidden=true;link.hidden=true;link.removeAttribute('href');$('downloadStatus').textContent='';}
+$('reportRows').addEventListener('change',event=>{if(event.target.matches('select[data-table]'))clearDownloadLink();});
+$('matchAll').addEventListener('click',clearDownloadLink);
 function save(blob,name) { const url=URL.createObjectURL(blob), link=document.createElement('a'); link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000); }
 $('reportDownload').addEventListener('click',()=>save(new Blob([JSON.stringify({report:plan,actions:actions()},null,2)],{type:'application/json'}),'compatibility-report.json'));
 $('download').addEventListener('click',async()=>{try{
-  $('download').disabled=true;
+  $('download').disabled=true;clearDownloadLink();$('downloadStatus').textContent='Creating a secure, short-lived download link…';$('downloadHelp').hidden=false;
   const ticket=await(await api('/plans/'+plan.id+'/download-ticket',actions())).json();
-  const link=document.createElement('a');link.href=ticket.url;link.download='migration.zip';document.body.append(link);link.click();link.remove();
-}catch(e){error(e.message);}finally{$('download').disabled=false;}});
+  const link=$('downloadLink');link.href=ticket.url;link.textContent=plan.orderedScript?'Save review package':'Save migration ZIP';link.hidden=false;$('downloadStatus').textContent='Download link ready. It expires in two minutes; click the link to save the ZIP.';
+}catch(e){clearDownloadLink();error(e.message);}finally{$('download').disabled=false;}});
+$('downloadLink').addEventListener('click',()=>{setTimeout(()=>{clearDownloadLink();$('downloadStatus').textContent='Download requested. If it did not start, prepare a fresh link.';$('downloadHelp').hidden=false;},0);});
 $('execute').addEventListener('click',async()=>{ try { $('execute').disabled=true; finalJob=await(await api('/plans/'+plan.id+'/execute',{target:connection('target'),actions:actions()})).json(); $('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);$('execute').disabled=false;} });
-function renderJob(){ $('jobProgress').textContent=progressText(finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);$('resumeJob').hidden=!finalJob.resumable; $('jobState').textContent=finalJob.state+' — '+finalJob.message; $('jobRows').replaceChildren(); for(const table of finalJob.tables){const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows,table.message].forEach(value=>cell(tr,value));$('jobRows').append(tr);} }
+function renderJob(){ renderProgress('job',finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);$('resumeJob').hidden=!finalJob.resumable; $('jobState').textContent=finalJob.state+' — '+finalJob.message; $('jobRows').replaceChildren(); for(const table of finalJob.tables){const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows,table.message].forEach(value=>cell(tr,value));$('jobRows').append(tr);} }
 async function pollJob(){ clearTimeout(polling); try{finalJob=await(await api('/jobs/'+finalJob.id,undefined,'GET')).json();renderJob();if(['RUNNING','QUEUED'].includes(finalJob.state))polling=setTimeout(pollJob,1500);}catch(e){error(e.message);polling=setTimeout(pollJob,5000);} }
 $('jobDownload').addEventListener('click',()=>save(new Blob([JSON.stringify(finalJob,null,2)],{type:'application/json'}),'execution-report.json'));
 function transferOptions(){return {maxRows:Number($('maxRows').value),maxTableBytes:Math.round(Number($('maxTableGb').value)*1e9),diskReserveBytes:Math.round(Number($('diskReserveMb').value)*1e6),fetchSize:Number($('fetchSize').value),batchRows:Number($('batchRows').value),batchBytes:Math.round(Number($('batchMb').value)*1e6),queryTimeoutSeconds:Number($('queryTimeout').value),readTimeoutSeconds:Number($('readTimeout').value),validateData:$('validateData').checked,useCopy:$('useCopy').checked};}
-function progressText(p){if(!p)return '';return `${p.phase} ${p.table||''} | Read ${p.rowsRead.toLocaleString()} | Sent ${p.rowsSent.toLocaleString()} | Committed ${p.rowsCommitted.toLocaleString()} | ${(p.bytes/1e6).toFixed(1)} MB | ${p.elapsedSeconds}s | ${Math.round(p.rowsPerSecond).toLocaleString()} rows/s`+(p.remainingSeconds!=null?` | Estimated ${p.remainingSeconds}s remaining`:'')+(p.cancelRequested?' | Cancellation requested':'');}
+function renderProgress(prefix,p){if(!p)return;const phases={QUEUED:'Queued',PREPARING:'Preparing',EXTRACTING:'Reading source',CHECKING:'Checking target and staged data',CREATING:'Creating tables',LOADING:'Loading data',FINALIZING:'Adding indexes and constraints',SUCCEEDED:'Complete',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'};$(`${prefix}Phase`).textContent=phases[p.phase]||p.phase||'Waiting';$(`${prefix}Table`).textContent=p.table?`Table: ${p.table}`:'';$(`${prefix}Read`).textContent=Number(p.rowsRead||0).toLocaleString();$(`${prefix}Sent`).textContent=prefix==='preparation'?'—':Number(p.rowsSent||0).toLocaleString();$(`${prefix}Committed`).textContent=prefix==='preparation'?'—':Number(p.rowsCommitted||0).toLocaleString();$(`${prefix}Bytes`).textContent=formatBytes(p.bytes);$(`${prefix}Elapsed`).textContent=formatDuration(p.elapsedSeconds);$(`${prefix}Rate`).textContent=Number(p.rowsPerSecond)>0?`${Math.round(p.rowsPerSecond).toLocaleString()} rows/s`:'—';$(`${prefix}Eta`).textContent=p.remainingSeconds==null?'—':formatDuration(p.remainingSeconds);}
+function formatBytes(value){let size=Number(value||0),unit='B';for(const next of ['KB','MB','GB','TB']){if(size<1000)break;size/=1000;unit=next;}return `${size<10&&unit!=='B'?size.toFixed(1):Math.round(size).toLocaleString()} ${unit}`;}
+function formatDuration(value){let seconds=Math.max(0,Math.floor(Number(value)||0));if(seconds<60)return `${seconds}s`;const units=[['d',86400],['h',3600],['m',60]];const parts=[];for(const [label,size] of units){if(seconds>=size){const amount=Math.floor(seconds/size);parts.push(`${amount}${label}`);seconds%=size;if(parts.length===2)break;}}if(parts.length<2&&seconds)parts.push(`${seconds}s`);return parts.join(' ');}
 $('prepareData').addEventListener('click',async()=>{if(!lastRequest)return;try{
   const version=requestVersion;const previousPlan=plan.id;const request={...lastRequest,metadataOnly:false};
   const started=await(await api('/preparations',request)).json();preparationId=started.id;$('preparationSection').hidden=false;$('cancelPreparation').hidden=false;$('prepareData').disabled=true;
-  async function poll(){try{const current=await(await api('/preparations/'+started.id,undefined,'GET')).json();$('preparationState').textContent=current.message+' '+progressText(current.progress);
+  async function poll(){try{const current=await(await api('/preparations/'+started.id,undefined,'GET')).json();$('preparationState').textContent=current.message;renderProgress('preparation',current.progress);
     if(['QUEUED','PREPARING'].includes(current.state)){preparationPoll=setTimeout(poll,1000);return;}
     $('cancelPreparation').hidden=true;$('prepareData').disabled=false;if(current.state==='READY'&&version===requestVersion){plan=current.plan;renderPlan();$('preview').textContent=await(await api('/plans/'+plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
     if(current.state==='READY'&&version!==requestVersion)await api('/plans/'+current.plan.id,undefined,'DELETE');
@@ -198,12 +204,28 @@ $('prepareData').addEventListener('click',async()=>{if(!lastRequest)return;try{
 $('cancelPreparation').addEventListener('click',async()=>{try{if(preparationId)await api('/preparations/'+preparationId+'/cancel',{});}catch(e){error(e.message);}});
 $('cancelJob').addEventListener('click',async()=>{try{finalJob=await(await api('/jobs/'+finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
 $('resumeJob').addEventListener('click',async()=>{try{finalJob=await(await api('/jobs/'+finalJob.id+'/resume',connection('target'))).json();renderJob();pollJob();}catch(e){error(e.message);}});
-$('refreshHistory').addEventListener('click',async()=>{try{
-  const jobs=await(await api('/jobs',undefined,'GET')).json();$('jobHistory').replaceChildren();
-  if(!jobs.length){$('jobHistory').textContent='No saved migrations.';return;}
-  for(const job of jobs){const button=document.createElement('button');button.className='secondary';button.textContent=job.state+' | '+job.id;
-    button.addEventListener('click',async()=>{try{finalJob=job;$('jobSection').hidden=false;renderJob();pollJob();plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();}catch(e){error(e.message);}});const row=document.createElement('div');row.className='history-row';row.append(button);if(!['RUNNING','QUEUED'].includes(job.state)){const remove=document.createElement('button');remove.className='secondary';remove.textContent='Delete saved files';remove.addEventListener('click',async()=>{if(!window.confirm('Delete this saved migration and its exported data? Target database rows will remain.'))return;try{await api('/plans/'+job.planId,undefined,'DELETE');row.remove();if(finalJob?.id===job.id){clearTimeout(polling);$('jobSection').hidden=true;}if(plan?.id===job.planId)invalidate();}catch(e){error(e.message);}});row.append(remove);}$('jobHistory').append(row);}
-}catch(e){error(e.message);}});
+function jobStateLabel(state){return ({QUEUED:'Queued',RUNNING:'Running',SUCCEEDED:'Completed',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'})[state]||state;}
+function jobHistoryCard(job){
+  const card=document.createElement('article');card.className='history-card';card.setAttribute('role','listitem');
+  const heading=document.createElement('div');heading.className='history-card-heading';
+  const state=document.createElement('span');state.className='history-state state-'+job.state.toLowerCase().replaceAll('_','-');state.textContent=jobStateLabel(job.state);
+  const id=document.createElement('code');id.textContent=job.id.slice(0,8);heading.append(state,id);card.append(heading);
+  const summary=document.createElement('p');const committed=Number(job.progress?.rowsCommitted||0);summary.className='history-summary';summary.textContent=`${job.tables.length} table${job.tables.length===1?'':'s'} · ${committed.toLocaleString()} rows committed`;card.append(summary);
+  const detail=document.createElement('p');detail.className='history-detail';detail.textContent=job.message;card.append(detail);
+  const actions=document.createElement('div');actions.className='history-actions';
+  const view=document.createElement('button');view.className='secondary';view.textContent='View report';view.addEventListener('click',async()=>{try{clearTimeout(polling);finalJob=job;$('jobSection').hidden=false;renderJob();plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(['RUNNING','QUEUED'].includes(job.state))pollJob();$('jobSection').scrollIntoView({behavior:'smooth',block:'start'});}catch(e){error(e.message);}});actions.append(view);
+  if(!['RUNNING','QUEUED'].includes(job.state)){const remove=document.createElement('button');remove.className='secondary';remove.textContent='Delete saved files';remove.addEventListener('click',async()=>{if(!window.confirm('Delete this saved migration and its exported data? Target database rows will remain.'))return;remove.disabled=true;try{await api('/plans/'+job.planId,undefined,'DELETE');if(finalJob?.id===job.id){clearTimeout(polling);$('jobSection').hidden=true;}if(plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}});actions.append(remove);}
+  card.append(actions);return card;
+}
+async function refreshHistory(){
+  const button=$('refreshHistory'),status=$('jobHistoryStatus');button.disabled=true;status.textContent='Loading saved migrations…';
+  try{const jobs=await(await api('/jobs',undefined,'GET')).json();const list=$('jobHistory');list.replaceChildren();
+    if(!jobs.length){list.textContent='No saved migrations.';status.textContent='History is up to date.';return;}
+    for(const job of jobs)list.append(jobHistoryCard(job));status.textContent=`${jobs.length} saved migration${jobs.length===1?'':'s'} loaded.`;
+  }catch(e){status.textContent='Could not refresh migration history.';error(e.message);}
+  finally{button.disabled=false;}
+}
+$('refreshHistory').addEventListener('click',refreshHistory);
 function tableSelections(){const result={};const selected=new Set(Array.from($('sourceTables').selectedOptions).map(o=>o.value));for(const group of $('columnOptions').children){if(!selected.has(group.dataset.table))continue;const columns=[],rename={};for(const row of group.querySelectorAll('[data-column]')){if(row.querySelector('input[type=checkbox]').checked){columns.push(row.dataset.column);const destination=row.querySelector('input[type=text]').value.trim();if(destination!==row.dataset.column)rename[row.dataset.column]=destination;}}
   if(!columns.length)throw new Error('Select at least one column for '+group.dataset.table);const column=group.querySelector('.filter-column').value,operator=group.querySelector('.filter-operator').value,value=group.querySelector('.filter-value').value;
   result[group.dataset.table]={columns,rename,filters:column?[{column,operator,value}]:[]};}return result;}
@@ -215,4 +237,4 @@ $('configureColumns').addEventListener('click',async()=>{try{
   }invalidate();
 }catch(e){error(e.message);}});
 $('sourceTables').addEventListener('change',()=>{$('columnOptions').replaceChildren();});
-updateFlow();
+updateFlow();refreshHistory();

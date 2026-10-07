@@ -1,0 +1,79 @@
+name: Package Windows zips
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to stamp on the packages (matches -Version on the packaging scripts)'
+        required: false
+        default: '1.0.0'
+
+env:
+  WEBVIEW2_VERSION: '1.0.4258.31'
+  WIX_TAG: 'wix3141rtm'
+  WIX_ASSET: 'wix314-binaries.zip'
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (provides jlink/jpackage)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and verify once (mvn verify)
+        run: mvn -B -ntp verify
+
+      - name: Download Microsoft.Web.WebView2 SDK
+        shell: pwsh
+        run: |
+          $nupkg = Join-Path $env:RUNNER_TEMP 'webview2.zip'
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/$env:WEBVIEW2_VERSION" -OutFile $nupkg
+          $sdkDir = Join-Path $env:RUNNER_TEMP 'webview2-sdk'
+          Expand-Archive -LiteralPath $nupkg -DestinationPath $sdkDir -Force
+          "FINGRESS_WEBVIEW2_SDK=$sdkDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download WiX 3 binaries (for the Setup.exe installer)
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'wix.zip'
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/$env:WIX_TAG/$env:WIX_ASSET" -OutFile $zip
+          $wixDir = Join-Path $env:RUNNER_TEMP 'wix-bin'
+          Expand-Archive -LiteralPath $zip -DestinationPath $wixDir -Force
+          "WIX_BIN=$wixDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Package System-Java zip
+        shell: pwsh
+        run: ./scripts/package-system-java.ps1 -SkipBuild -Version "${{ inputs.version }}" -WebView2Sdk "$env:FINGRESS_WEBVIEW2_SDK"
+
+      - name: Package Windows app-image zip
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Type app-image -SkipBuild -Version "${{ inputs.version }}" -WebView2Sdk "$env:FINGRESS_WEBVIEW2_SDK"
+
+      - name: Package Windows Setup.exe installer
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Type exe -SkipBuild -Version "${{ inputs.version }}" -WebView2Sdk "$env:FINGRESS_WEBVIEW2_SDK" -WixBin "$env:WIX_BIN"
+
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path dist -Include *.zip,*.exe -Recurse -File |
+            ForEach-Object { Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 } |
+            ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -LiteralPath (Join-Path 'dist' 'SHA256SUMS.txt') -Encoding utf8
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: fingress-sql-migration-${{ inputs.version }}
+          path: |
+            dist/*.zip
+            dist/*.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error

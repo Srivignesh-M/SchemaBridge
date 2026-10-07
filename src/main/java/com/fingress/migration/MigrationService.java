@@ -93,6 +93,7 @@ public class MigrationService implements AutoCloseable {
         List<String> issues = new ArrayList<>(), warnings = new ArrayList<>();
         warnings.add("Execution uses insert-only semantics. Existing primary/unique keys can reject rows; no rows are silently skipped or overwritten.");
         warnings.add("Run against a quiescent target: concurrent writers or schema changes during execution are not supported. Identity/sequence changes are not transactional.");
+        if(request.source()!=null)warnings.add("Preparation stages a source snapshot locally. If extraction is interrupted or the source snapshot is lost, prepare again from the source; extraction cannot resume from the old snapshot.");
         if (request.targetDialect() == Dialect.ORACLE) warnings.add("Oracle DDL commits implicitly. Failed jobs can leave created objects and previously committed tables.");
         try {
             if (request.source() == null) fromSql(request, plan, issues);
@@ -404,10 +405,11 @@ public class MigrationService implements AutoCloseable {
                         }
                         for(Table table:plan.tables){
                             active=table.name().in(plan.view.targetDialect());if(actions.get(active)==Action.SKIP||job.finalized.contains(active))continue;
-                            job.progress.check();job.progress.table=active;job.progress.phase="FINALIZING";checkpoint(plan,job);risky=true;job.progress.statement=statement;
+                            job.progress.check();job.progress.table=active;job.progress.phase="FINALIZING";checkpoint(plan,job);
+                            risky=plan.view.targetDialect()==Dialect.ORACLE||!identitySql(table,plan).isEmpty();job.progress.statement=statement;
                             for(String sql:identitySql(table,plan))statement.execute(sql);
                             if(actions.get(active)==Action.CREATE_AND_LOAD)for(String sql:SqlWriter.afterData(table,plan.view.targetSchema(),plan.view.targetDialect()))statement.execute(sql);
-                            connection.commit();job.finalized.add(active);checkpoint(plan,job);risky=false;
+                            risky=true;connection.commit();job.finalized.add(active);checkpoint(plan,job);risky=false;
                         }
                     }catch(Exception failure){try{connection.rollback();}catch(SQLException rollback){risky=true;}throw failure;}
                 }
