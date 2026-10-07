@@ -19,8 +19,12 @@ final class TableProjection {
         String mapped=selection.rename().get(name.in(source));
         return mapped==null?name:new Name(mapped,true);
     }
+    static Name renameTable(Name name,TableSelection selection,Dialect source) {
+        if(selection==null || selection.tableName()==null || selection.tableName().isBlank())return name;
+        return new Name(selection.tableName().trim(),true);
+    }
     static List<Key> keys(Table table,TableSelection selection,Map<String,TableSelection> all,Dialect source){
-        return table.keys().stream().map(k->new Key(k.kind(),k.columns().stream().map(n->rename(n,selection,source)).toList(),k.reference(),
+        return table.keys().stream().map(k->new Key(k.kind(),k.columns().stream().map(n->rename(n,selection,source)).toList(),k.reference()==null?null:renameTable(k.reference(),all.get(k.reference().in(source)),source),
                 k.referenceColumns().stream().map(n->rename(n,k.reference()==null?null:all.get(k.reference().in(source)),source)).toList(),k.name(),k.expression())).toList();
     }
     static String where(Table table,TableSelection selection,Dialect dialect,List<Object> values){

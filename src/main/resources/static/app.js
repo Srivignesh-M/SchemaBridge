@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let plan = null, finalJob = null, polling = null, errorTimer = null, lastRequest = null, preparationId = null, preparationPoll = null, requestVersion = 0;
+let plan = null, finalJob = null, polling = null, errorTimer = null, lastRequest = null, preparationId = null, preparationPoll = null, requestVersion = 0, currentStep = 1, maxStep = 1;
 const databaseNames = {source: {}, target: {}};
 const catalogSelection = {source:null,target:null};
 let catalogLoading = false;
@@ -15,7 +15,7 @@ function setCatalogMode(prefix, selection) {
     $(prefix+'DatabaseHelp').textContent = 'Loaded from LCNC: '+selection.name+'. Choose Manual entry to edit connection values.';
   } else { applyDialect(prefix); $(prefix+'Catalog').value=''; }
   fillOptions($(prefix+'SchemaSelect'), []);
-  if(prefix === 'source') {fillOptions($('sourceTables'), []);$('columnOptions').replaceChildren();}
+  if(prefix === 'source') {fillOptions($('sourceTables'), []);$('columnOptions').replaceChildren();if($('tablePickerList'))renderTablePicker();}
   else $('targetSchema').value = selection?.schema || ($(prefix+'Dialect').value === 'ORACLE' ? 'APP' : 'public');
   invalidate();
 }
@@ -96,17 +96,43 @@ function connection(prefix) {
   return {dialect,host:$(prefix + 'Host').value.trim(),port:Number($(prefix + 'Port').value),database,username:$(prefix + 'Username').value,password:$(prefix + 'Password').value,...(catalogSelection[prefix]?{jdbcUrl:catalogSelection[prefix].connection.jdbcUrl}:{})};
 }
 function fillOptions(select, values) { select.replaceChildren(); for (const value of values) { const option = document.createElement('option'); option.value = option.textContent = value; select.append(option); } }
-async function loadTables() { $('columnOptions').replaceChildren(); try { const schema = $('sourceSchemaSelect').value; if (schema) fillOptions($('sourceTables'), await (await api('/tables', {connection:connection('source'),schema})).json()); } catch(e) { error(e.message); } }
-function invalidate() { requestVersion++; lastRequest=null; plan = null; $('reportSection').hidden = true; $('configStatus').textContent = 'Settings changed. Analyse to refresh the compatibility report.'; }
+async function loadTables() { $('columnOptions').replaceChildren();fillOptions($('sourceTables'),[]); try { const schema = $('sourceSchemaSelect').value; if (schema) fillOptions($('sourceTables'), await (await api('/tables', {connection:connection('source'),schema})).json()); renderTablePicker(); } catch(e) { renderTablePicker();error(e.message); } }
+function goToStep(step, scroll=true) {
+  if (step > maxStep || step < 1) return;
+  currentStep = step;
+  document.querySelectorAll('[data-step-page]').forEach(page => page.hidden = Number(page.dataset.stepPage) !== step);
+  document.querySelectorAll('[data-step-nav]').forEach(button => {
+    const number = Number(button.dataset.stepNav), active = number === step;
+    button.classList.toggle('active', active); button.classList.toggle('complete', number < step);
+    button.disabled = number > maxStep;
+    if (active) button.setAttribute('aria-current','step'); else button.removeAttribute('aria-current');
+  });
+  if (scroll) window.scrollTo({top:0,behavior:'smooth'});
+}
+function invalidate() {
+  requestVersion++; lastRequest=null; plan = null; maxStep=Math.min(maxStep,2);
+  if ($('reportSection')) $('reportSection').hidden = true;
+  if ($('outputActions')) $('outputActions').hidden = true;
+  if ($('reviewNext')) $('reviewNext').disabled = true;
+  if ($('reviewStatus')) $('reviewStatus').textContent = 'Analysis is required before continuing.';
+  if ($('configStatus')) $('configStatus').textContent = 'Settings changed. Analyse to refresh the compatibility report.';
+  if (currentStep > 2 && $('reviewPage')) goToStep(2);
+}
 function updateFlow() {
   $('sourceConnection').hidden = !usesDatabase(); $('tableSelection').hidden = !usesDatabase(); $('filesInput').hidden = usesDatabase(); $('targetConnection').hidden = !writesDatabase();
   for (const prefix of ['source','target']) $(prefix + 'Connection').querySelectorAll('input,select,button').forEach(field => field.disabled = $(prefix + 'Connection').hidden);
+  $('openTablePicker').disabled = !usesDatabase() || !$('sourceSchemaSelect').value;
   invalidate();
 }
 connectionForm('source'); connectionForm('target');
 document.querySelectorAll('input[name="flow"]').forEach(input => input.addEventListener('change', updateFlow));
+document.querySelectorAll('[data-step-nav]').forEach(button => button.addEventListener('click',()=>goToStep(Number(button.dataset.stepNav))));
+document.querySelectorAll('[data-back]').forEach(button => button.addEventListener('click',()=>goToStep(Number(button.dataset.back))));
+$('flowNext').addEventListener('click',()=>{maxStep=Math.max(maxStep,2);goToStep(2);});
+$('reviewNext').addEventListener('click',()=>{if(!plan)return;maxStep=Math.max(maxStep,4);goToStep(4);});
+$('startOver').addEventListener('click',()=>{plan=null;lastRequest=null;maxStep=1;$('reportSection').hidden=true;$('outputActions').hidden=true;$('preparationSection').hidden=true;$('jobSection').hidden=true;goToStep(1);});
 $('configuration').addEventListener('input', invalidate);
-for (const prefix of ['source','target']) $(prefix + 'Dialect').addEventListener('change', () => { if(prefix==='source')$('columnOptions').replaceChildren(); applyDialect(prefix); fillOptions($(prefix + 'SchemaSelect'), []); if(prefix === 'source') {fillOptions($('sourceTables'), []);$('columnOptions').replaceChildren();} else $('targetSchema').value = $('targetDialect').value === 'ORACLE' ? 'APP' : 'public'; });
+for (const prefix of ['source','target']) $(prefix + 'Dialect').addEventListener('change', () => { if(prefix==='source')$('columnOptions').replaceChildren(); applyDialect(prefix); fillOptions($(prefix + 'SchemaSelect'), []); if(prefix === 'source') {fillOptions($('sourceTables'), []);$('columnOptions').replaceChildren();renderTablePicker();} else $('targetSchema').value = $('targetDialect').value === 'ORACLE' ? 'APP' : 'public'; });
 let uploadVersion = 0;
 async function loadSqlFiles(input) {
   const selected = Array.from(input.files);
@@ -141,13 +167,17 @@ $('example').addEventListener('click', () => { $('sourceDialect').value = 'ORACL
 $('configuration').addEventListener('submit', async event => {
   event.preventDefault(); $('analyse').disabled = true; $('configStatus').textContent = 'Reading source and comparing target definitions…';
   try {
+    if(usesDatabase()&&!selectedSourceTables().length)throw new Error('Choose at least one source table before analysis.');
     const request = {options:transferOptions(),selections:usesDatabase()?tableSelections():{},metadataOnly:usesDatabase(),sourceDialect:$('sourceDialect').value,targetDialect:$('targetDialect').value,targetSchema:$('targetSchema').value.trim(),sql:usesDatabase()?null:$('sql').value,source:usesDatabase()?connection('source'):null,sourceSchema:usesDatabase()?$('sourceSchemaSelect').value:null,tables:usesDatabase()?Array.from($('sourceTables').selectedOptions).map(o=>o.value):[],includeData:$('includeData').checked,target:writesDatabase()?connection('target'):null};
-    lastRequest=request; const version=requestVersion; const result = await (await api('/plans', request)).json(); if(version!==requestVersion){await api('/plans/'+result.id,undefined,'DELETE');return;} plan=result; renderPlan(); $('preview').textContent = await (await api('/plans/' + plan.id + '/preview', undefined, 'GET')).text(); $('configStatus').textContent = 'Analysis complete. Review the table actions below.'; $('reportSection').scrollIntoView({block:'start'});
+    lastRequest=request; const version=requestVersion; const result = await (await api('/plans', request)).json(); if(version!==requestVersion){await api('/plans/'+result.id,undefined,'DELETE');return;} plan=result; renderPlan(); $('preview').textContent = await (await api('/plans/' + plan.id + '/preview', undefined, 'GET')).text(); $('configStatus').textContent = 'Analysis complete. Review the proposed changes.'; maxStep=Math.max(maxStep,3);goToStep(3);
   } catch(e) { error(e.message); $('configStatus').textContent = 'Analysis failed. Check the message and try again.'; } finally { $('analyse').disabled = false; }
 });
 function cell(row,text) { const td = document.createElement('td'); td.textContent = text; row.append(td); return td; }
 function renderPlan() {
   $('reportSection').hidden = false; $('reportMessages').replaceChildren(); $('reportRows').replaceChildren();
+  $('outputActions').hidden = false; $('reviewNext').disabled = false; $('reviewStatus').textContent = 'Review complete. Continue when you are ready to export or run the plan.';
+  $('outputTitle').textContent = plan.orderedScript ? 'Download converted script' : 'Ready to export or execute';
+  $('outputDescription').textContent = plan.orderedScript ? 'This script preserves statement order and is provided as a review package.' : 'Choose an export or run the reviewed plan against the target database.';
   $('reportTitle').textContent = plan.orderedScript ? 'Review the script in execution order' : 'Review every table';
   $('matchAll').hidden = !!plan.orderedScript; $('tableReport').hidden = !!plan.orderedScript;
   $('statementSection').hidden = !plan.orderedScript; $('statementRows').replaceChildren();
@@ -184,7 +214,7 @@ $('download').addEventListener('click',async()=>{try{
 $('downloadLink').addEventListener('click',()=>{setTimeout(()=>{clearDownloadLink();$('downloadStatus').textContent='Download requested. If it did not start, prepare a fresh link.';$('downloadHelp').hidden=false;},0);});
 $('execute').addEventListener('click',async()=>{ try { $('execute').disabled=true; finalJob=await(await api('/plans/'+plan.id+'/execute',{target:connection('target'),actions:actions()})).json(); $('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);$('execute').disabled=false;} });
 function renderJob(){ renderProgress('job',finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);$('resumeJob').hidden=!finalJob.resumable; $('jobState').textContent=finalJob.state+' — '+finalJob.message; $('jobRows').replaceChildren(); for(const table of finalJob.tables){const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows,table.message].forEach(value=>cell(tr,value));$('jobRows').append(tr);} }
-async function pollJob(){ clearTimeout(polling); try{finalJob=await(await api('/jobs/'+finalJob.id,undefined,'GET')).json();renderJob();if(['RUNNING','QUEUED'].includes(finalJob.state))polling=setTimeout(pollJob,1500);}catch(e){error(e.message);polling=setTimeout(pollJob,5000);} }
+async function pollJob(){ clearTimeout(polling); try{finalJob=await(await api('/jobs/'+finalJob.id,undefined,'GET')).json();renderJob();if(['RUNNING','QUEUED'].includes(finalJob.state))polling=setTimeout(pollJob,1500);else refreshHistory();}catch(e){error(e.message);polling=setTimeout(pollJob,5000);} }
 $('jobDownload').addEventListener('click',()=>save(new Blob([JSON.stringify(finalJob,null,2)],{type:'application/json'}),'execution-report.json'));
 function transferOptions(){return {maxRows:Number($('maxRows').value),maxTableBytes:Math.round(Number($('maxTableGb').value)*1e9),diskReserveBytes:Math.round(Number($('diskReserveMb').value)*1e6),fetchSize:Number($('fetchSize').value),batchRows:Number($('batchRows').value),batchBytes:Math.round(Number($('batchMb').value)*1e6),queryTimeoutSeconds:Number($('queryTimeout').value),readTimeoutSeconds:Number($('readTimeout').value),validateData:$('validateData').checked,useCopy:$('useCopy').checked};}
 function renderProgress(prefix,p){if(!p)return;const phases={QUEUED:'Queued',PREPARING:'Preparing',EXTRACTING:'Reading source',CHECKING:'Checking target and staged data',CREATING:'Creating tables',LOADING:'Loading data',FINALIZING:'Adding indexes and constraints',SUCCEEDED:'Complete',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'};$(`${prefix}Phase`).textContent=phases[p.phase]||p.phase||'Waiting';$(`${prefix}Table`).textContent=p.table?`Table: ${p.table}`:'';$(`${prefix}Read`).textContent=Number(p.rowsRead||0).toLocaleString();$(`${prefix}Sent`).textContent=prefix==='preparation'?'—':Number(p.rowsSent||0).toLocaleString();$(`${prefix}Committed`).textContent=prefix==='preparation'?'—':Number(p.rowsCommitted||0).toLocaleString();$(`${prefix}Bytes`).textContent=formatBytes(p.bytes);$(`${prefix}Elapsed`).textContent=formatDuration(p.elapsedSeconds);$(`${prefix}Rate`).textContent=Number(p.rowsPerSecond)>0?`${Math.round(p.rowsPerSecond).toLocaleString()} rows/s`:'—';$(`${prefix}Eta`).textContent=p.remainingSeconds==null?'—':formatDuration(p.remainingSeconds);}
@@ -210,10 +240,10 @@ function jobHistoryCard(job){
   const heading=document.createElement('div');heading.className='history-card-heading';
   const state=document.createElement('span');state.className='history-state state-'+job.state.toLowerCase().replaceAll('_','-');state.textContent=jobStateLabel(job.state);
   const id=document.createElement('code');id.textContent=job.id.slice(0,8);heading.append(state,id);card.append(heading);
-  const summary=document.createElement('p');const committed=Number(job.progress?.rowsCommitted||0);summary.className='history-summary';summary.textContent=`${job.tables.length} table${job.tables.length===1?'':'s'} · ${committed.toLocaleString()} rows committed`;card.append(summary);
+  const summary=document.createElement('p');const committed=Number(job.progress?.rowsCommitted||0);summary.className='history-summary';summary.textContent=`${job.tables.length} table${job.tables.length===1?'':'s'} · ${committed.toLocaleString()} ${job.state==='RECOVERY_REQUIRED'?'rows recorded committed':'rows committed'}`;card.append(summary);
   const detail=document.createElement('p');detail.className='history-detail';detail.textContent=job.message;card.append(detail);
   const actions=document.createElement('div');actions.className='history-actions';
-  const view=document.createElement('button');view.className='secondary';view.textContent='View report';view.addEventListener('click',async()=>{try{clearTimeout(polling);finalJob=job;$('jobSection').hidden=false;renderJob();plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(['RUNNING','QUEUED'].includes(job.state))pollJob();$('jobSection').scrollIntoView({behavior:'smooth',block:'start'});}catch(e){error(e.message);}});actions.append(view);
+  const view=document.createElement('button');view.className='secondary';view.textContent='View report';view.addEventListener('click',async()=>{try{clearTimeout(polling);finalJob=job;$('jobSection').hidden=false;renderJob();plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(['RUNNING','QUEUED'].includes(job.state))pollJob();maxStep=4;goToStep(4);}catch(e){error(e.message);}});actions.append(view);
   if(!['RUNNING','QUEUED'].includes(job.state)){const remove=document.createElement('button');remove.className='secondary';remove.textContent='Delete saved files';remove.addEventListener('click',async()=>{if(!window.confirm('Delete this saved migration and its exported data? Target database rows will remain.'))return;remove.disabled=true;try{await api('/plans/'+job.planId,undefined,'DELETE');if(finalJob?.id===job.id){clearTimeout(polling);$('jobSection').hidden=true;}if(plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}});actions.append(remove);}
   card.append(actions);return card;
 }
@@ -226,15 +256,62 @@ async function refreshHistory(){
   finally{button.disabled=false;}
 }
 $('refreshHistory').addEventListener('click',refreshHistory);
-function tableSelections(){const result={};const selected=new Set(Array.from($('sourceTables').selectedOptions).map(o=>o.value));for(const group of $('columnOptions').children){if(!selected.has(group.dataset.table))continue;const columns=[],rename={};for(const row of group.querySelectorAll('[data-column]')){if(row.querySelector('input[type=checkbox]').checked){columns.push(row.dataset.column);const destination=row.querySelector('input[type=text]').value.trim();if(destination!==row.dataset.column)rename[row.dataset.column]=destination;}}
-  if(!columns.length)throw new Error('Select at least one column for '+group.dataset.table);const column=group.querySelector('.filter-column').value,operator=group.querySelector('.filter-operator').value,value=group.querySelector('.filter-value').value;
-  result[group.dataset.table]={columns,rename,filters:column?[{column,operator,value}]:[]};}return result;}
+function selectedSourceTables(){return Array.from($('sourceTables').selectedOptions).map(option=>option.value);}
+function renderTablePicker(){
+  if(!$('tablePickerList'))return;
+  const selected=new Set(selectedSourceTables()),list=$('tablePickerList');list.replaceChildren();
+  for(const option of $('sourceTables').options){const label=document.createElement('label');label.className='table-picker-option';label.dataset.name=option.value.toLocaleLowerCase();const check=document.createElement('input');check.type='checkbox';check.checked=selected.has(option.value);check.value=option.value;const name=document.createElement('span');name.textContent=option.value;label.append(check,name);list.append(label);}
+  const query=$('tableSearch').value.trim().toLocaleLowerCase();for(const row of list.querySelectorAll('.table-picker-option'))row.hidden=!row.dataset.name.includes(query);
+  updateTablePickerSummary();
+}
+function updateTablePickerSummary(){
+  const selected=selectedSourceTables();
+  if($('tableSelectionSummary'))$('tableSelectionSummary').textContent=selected.length?`${selected.length} table${selected.length===1?'':'s'} selected`:'No tables selected yet.';
+  if($('pickerCount'))$('pickerCount').textContent=selected.length?`${selected.length} table${selected.length===1?'':'s'} selected for this migration.`:'No tables selected.';
+  if($('openTablePicker'))$('openTablePicker').disabled=!$('sourceSchemaSelect').value||!$('sourceTables').options.length;
+  if($('selectAllTables')){const visible=Array.from($('tablePickerList').querySelectorAll('.table-picker-option')).filter(row=>!row.hidden),checked=visible.filter(row=>row.querySelector('input').checked).length;$('selectAllTables').checked=visible.length>0&&checked===visible.length;$('selectAllTables').indeterminate=checked>0&&checked<visible.length;$('selectAllTables').disabled=visible.length===0;}
+}
+function tableSelections(){
+  const result={},selected=new Set(selectedSourceTables());
+  for(const group of $('columnOptions').children){if(!selected.has(group.dataset.table))continue;
+    const columns=[],rename={};
+    for(const row of group.querySelectorAll('[data-column]'))if(row.querySelector('input[type=checkbox]').checked){columns.push(row.dataset.column);const destination=row.querySelector('input[type=text]').value.trim();if(destination!==row.dataset.column)rename[row.dataset.column]=destination;}
+    if(!columns.length)throw new Error('Select at least one column for '+group.dataset.table);
+    const tableName=group.querySelector('.target-table-name').value.trim();if(!tableName)throw new Error('Enter a destination table name for '+group.dataset.table);
+    const column=group.querySelector('.filter-column').value,operator=group.querySelector('.filter-operator').value,value=group.querySelector('.filter-value').value;
+    result[group.dataset.table]={columns,rename,filters:column?[{column,operator,value}]:[],...(tableName!==group.dataset.table?{tableName}:{})};
+  }
+  return result;
+}
 $('configureColumns').addEventListener('click',async()=>{try{
   $('columnOptions').replaceChildren();for(const option of $('sourceTables').selectedOptions){const table=option.value;const columns=await(await api('/columns',{connection:connection('source'),schema:$('sourceSchemaSelect').value,table})).json();
     const group=document.createElement('details');group.dataset.table=table;group.open=true;const summary=document.createElement('summary');summary.textContent=table;group.append(summary);
+    const targetLabel=document.createElement('label');targetLabel.textContent='Destination table name';const targetName=document.createElement('input');targetName.type='text';targetName.className='target-table-name';targetName.value=table;targetName.required=true;targetName.maxLength=128;targetName.setAttribute('aria-label','Destination table name for '+table);targetLabel.append(targetName);group.append(targetLabel);
     for(const column of columns){const row=document.createElement('label');row.className='inline';row.dataset.column=column.name.value;const check=document.createElement('input');check.type='checkbox';check.checked=true;const title=document.createElement('span');title.textContent=column.name.value+' ? ';const destination=document.createElement('input');destination.type='text';destination.value=column.name.value;destination.setAttribute('aria-label','Destination name for '+column.name.value);row.append(check,title,destination);group.append(row);}
     const filter=document.createElement('label');filter.textContent='Only transfer rows matching';const field=document.createElement('select');field.className='filter-column';fillOptions(field,['',...columns.map(c=>c.name.value)]);const operator=document.createElement('select');operator.className='filter-operator';fillOptions(operator,['=','<>','>','>=','<','<=','IS NULL','IS NOT NULL']);const value=document.createElement('input');value.className='filter-value';value.placeholder='Value';filter.append(field,operator,value);group.append(filter);$('columnOptions').append(group);
   }invalidate();
 }catch(e){error(e.message);}});
-$('sourceTables').addEventListener('change',()=>{$('columnOptions').replaceChildren();});
+$('sourceTables').addEventListener('change',renderTablePicker);
+let pickerOriginalSelection=[];
+$('openTablePicker').addEventListener('click',()=>{pickerOriginalSelection=selectedSourceTables();renderTablePicker();$('tablePicker').showModal();});
+function closeTablePicker(apply){
+  if(!apply){const selected=new Set(pickerOriginalSelection);for(const option of $('sourceTables').options)option.selected=selected.has(option.value);renderTablePicker();}
+  else if(!selectedSourceTables().length){error('Select at least one source table to continue.');return;}
+  $('tablePicker').close();updateTablePickerSummary();
+}
+$('closeTablePicker').addEventListener('click',()=>closeTablePicker(false));
+$('cancelTablePicker').addEventListener('click',()=>closeTablePicker(false));
+$('applyTablePicker').addEventListener('click',()=>closeTablePicker(true));
+$('tablePicker').addEventListener('cancel',()=>{const selected=new Set(pickerOriginalSelection);for(const option of $('sourceTables').options)option.selected=selected.has(option.value);renderTablePicker();});
+$('tablePickerList').addEventListener('change',event=>{
+  if(!event.target.matches('input[type=checkbox]'))return;
+  const option=Array.from($('sourceTables').options).find(item=>item.value===event.target.value);if(option)option.selected=event.target.checked;
+  $('sourceTables').dispatchEvent(new Event('change',{bubbles:true}));updateTablePickerSummary();
+});
+$('tableSearch').addEventListener('input',()=>{const query=$('tableSearch').value.trim().toLocaleLowerCase();for(const row of $('tablePickerList').querySelectorAll('.table-picker-option'))row.hidden=!row.dataset.name.includes(query);updateTablePickerSummary();});
+$('selectAllTables').addEventListener('change',()=>{
+  const visible=Array.from($('tablePickerList').querySelectorAll('.table-picker-option')).filter(row=>!row.hidden),turnOn=$('selectAllTables').checked;
+  for(const row of visible){const checkbox=row.querySelector('input');checkbox.checked=turnOn;const option=Array.from($('sourceTables').options).find(item=>item.value===checkbox.value);if(option)option.selected=turnOn;}
+  $('sourceTables').dispatchEvent(new Event('change',{bubbles:true}));updateTablePickerSummary();
+});
 updateFlow();refreshHistory();

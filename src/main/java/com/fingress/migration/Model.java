@@ -78,7 +78,9 @@ public final class Model {
         }
     }
     public record RowFilter(String column, String operator, String value) {}
-    public record TableSelection(List<String> columns, Map<String,String> rename, List<RowFilter> filters) {}
+    public record TableSelection(List<String> columns, Map<String,String> rename, List<RowFilter> filters, String tableName) {
+        public TableSelection(List<String> columns, Map<String,String> rename, List<RowFilter> filters) { this(columns, rename, filters, null); }
+    }
     public enum Status { NEW, MATCH, MISMATCH, UNCHECKED }
     public enum Action { CREATE_AND_LOAD, DML_ONLY, SKIP }
     public record TableReport(String table, Status status, List<String> differences, List<String> warnings, long rows, List<Action> allowedActions, Long estimatedRows) {}

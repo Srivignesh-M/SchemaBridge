@@ -184,7 +184,7 @@ public class MigrationService implements AutoCloseable {
                         converted.add(new Column(TableProjection.rename(c.name(),selection,request.sourceDialect()), c.generated() ? c.type().identityTarget(request.targetDialect()) : c.type().target(request.targetDialect()), c.nullable(), c.defaultValue(), c.generated(), c.always()));
                     }
                     if(converted.stream().map(c->c.name().in(request.targetDialect())).distinct().count()!=converted.size())throw new IllegalArgumentException("Mapped column names collide");
-                    Table table = new Table(source.name(), converted, TableProjection.keys(source,selection,selections,request.sourceDialect()), source.warnings());
+                    Table table = new Table(TableProjection.renameTable(source.name(),selection,request.sourceDialect()), converted, TableProjection.keys(source,selection,selections,request.sourceDialect()), source.warnings());
                     String name = table.name().in(request.targetDialect());
                     if (plan.data.containsKey(name)) throw new IllegalArgumentException("Duplicate mapped table name: " + name);
                     Path path = plan.directory.resolve("data-" + plan.data.size() + ".rows");
