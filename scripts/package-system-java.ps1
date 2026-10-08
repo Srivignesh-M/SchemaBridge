@@ -18,7 +18,8 @@ try {
     Copy-Item -LiteralPath 'target/fg-sql-migration-1.0.0-SNAPSHOT.jar' -Destination $app
     & (Join-Path $PSScriptRoot 'build-desktop.ps1') -OutputDirectory (Join-Path $app 'desktop') -WebView2Sdk $WebView2Sdk
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-    & $compiler /nologo /target:winexe /platform:x64 /optimize+ "/out:$(Join-Path $package 'Fingress SQL Migration.exe')" /reference:System.Windows.Forms.dll (Join-Path $project 'desktop/SystemJavaLauncher.cs')
+    $icon = Join-Path $project 'src/main/resources/static/images/schemabridge.ico'
+    & $compiler /nologo /target:winexe /platform:x64 /optimize+ "/win32icon:$icon" "/out:$(Join-Path $package 'Fingress SQL Migration.exe')" /reference:System.Windows.Forms.dll (Join-Path $project 'desktop/SystemJavaLauncher.cs')
     if ($LASTEXITCODE -ne 0) { throw 'System Java launcher compilation failed.' }
     Copy-Item -LiteralPath 'SYSTEM-JAVA-README.txt' -Destination (Join-Path $package 'README.txt')
     $dist = Join-Path $project 'dist'

@@ -314,4 +314,5 @@ $('selectAllTables').addEventListener('change',()=>{
   for(const row of visible){const checkbox=row.querySelector('input');checkbox.checked=turnOn;const option=Array.from($('sourceTables').options).find(item=>item.value===checkbox.value);if(option)option.selected=turnOn;}
   $('sourceTables').dispatchEvent(new Event('change',{bubbles:true}));updateTablePickerSummary();
 });
-updateFlow();refreshHistory();
+async function loadBuildVersion(){try{const response=await api('/capabilities',undefined,'GET');const info=await response.json();$('buildVersion').textContent='Version '+info.version;}catch(_){$('buildVersion').textContent='Version unavailable';}}
+updateFlow();refreshHistory();loadBuildVersion();

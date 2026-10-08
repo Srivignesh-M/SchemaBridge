@@ -1,10 +1,10 @@
-name: Package Windows zips
+name: Package Windows Setup.exe installer
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version string to stamp on the packages (matches -Version on the packaging scripts)'
+        description: 'Version string to stamp on the package (matches -Version on the packaging script)'
         required: false
         default: '1.0.0'
 
@@ -14,7 +14,7 @@ env:
   WIX_ASSET: 'wix314-binaries.zip'
 
 jobs:
-  package:
+  package-windows-installer:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -48,14 +48,6 @@ jobs:
           Expand-Archive -LiteralPath $zip -DestinationPath $wixDir -Force
           "WIX_BIN=$wixDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Package System-Java zip
-        shell: pwsh
-        run: ./scripts/package-system-java.ps1 -SkipBuild -Version "${{ inputs.version }}" -WebView2Sdk "$env:FINGRESS_WEBVIEW2_SDK"
-
-      - name: Package Windows app-image zip
-        shell: pwsh
-        run: ./scripts/package-windows.ps1 -Type app-image -SkipBuild -Version "${{ inputs.version }}" -WebView2Sdk "$env:FINGRESS_WEBVIEW2_SDK"
-
       - name: Package Windows Setup.exe installer
         shell: pwsh
         run: ./scripts/package-windows.ps1 -Type exe -SkipBuild -Version "${{ inputs.version }}" -WebView2Sdk "$env:FINGRESS_WEBVIEW2_SDK" -WixBin "$env:WIX_BIN"
@@ -68,12 +60,11 @@ jobs:
             ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
             Set-Content -LiteralPath (Join-Path 'dist' 'SHA256SUMS.txt') -Encoding utf8
 
-      - name: Upload packages
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: fingress-sql-migration-${{ inputs.version }}
+          name: fingress-sql-migration-windows-installer-${{ inputs.version }}
           path: |
-            dist/*.zip
             dist/*.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error

@@ -1,6 +1,8 @@
 package com.fingress.migration;
 
 import org.springframework.http.*;
+import org.springframework.boot.info.BuildProperties;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.bind.annotation.*;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.*;
@@ -9,12 +11,12 @@ import static com.fingress.migration.Model.*;
 @RestController
 @RequestMapping("/api")
 public class MigrationController {
-    private final MigrationService service; private final DatabaseGateway db;
+    private final MigrationService service; private final DatabaseGateway db; private final BuildProperties build;
     private record DownloadTicket(String planId,Map<String,Action> actions,long expires) {}
     private final java.util.concurrent.ConcurrentHashMap<String,DownloadTicket> tickets=new java.util.concurrent.ConcurrentHashMap<>();
-    public MigrationController(MigrationService service, DatabaseGateway db) { this.service = service; this.db = db; }
+    public MigrationController(MigrationService service, DatabaseGateway db, ObjectProvider<BuildProperties> build) { this.service = service; this.db = db; this.build = build.getIfAvailable(); }
     public record TablesRequest(ConnectionSpec connection, String schema) {}
-    @GetMapping("/capabilities") public Map<String, Object> capabilities() { return Map.of("dialects", List.of("ORACLE", "POSTGRESQL"), "executionPolicy", "INSERT_ONLY", "version","1.1.0", "defaults",MigrationOptions.defaults()); }
+    @GetMapping("/capabilities") public Map<String, Object> capabilities() { return Map.of("dialects", List.of("ORACLE", "POSTGRESQL"), "executionPolicy", "INSERT_ONLY", "version", build == null ? "development" : build.getVersion(), "defaults",MigrationOptions.defaults()); }
     public record ColumnsRequest(ConnectionSpec connection,String schema,String table) {}
     @PostMapping("/columns") public List<Column> columns(@RequestBody ColumnsRequest request)throws Exception {
         try(var connection=db.connect(request.connection())){Table table=db.inspect(connection,request.schema(),request.table(),request.connection().dialect());if(table==null)throw new IllegalArgumentException("Table not found");return table.columns();}

@@ -45,7 +45,8 @@ try {
         '--main-jar', (Split-Path $jar -Leaf),
         '--main-class', 'org.springframework.boot.loader.launch.JarLauncher',
         '--arguments', '--desktop', '--java-options', '-Djava.awt.headless=false',
-        '--runtime-image', $runtimeDir)
+        '--runtime-image', $runtimeDir,
+        '--icon', (Join-Path $project 'src/main/resources/static/images/schemabridge.ico'))
     if ($Type -eq 'exe') {
         $packageArgs += @('--win-per-user-install', '--win-dir-chooser', '--win-menu',
             '--win-menu-group', 'Fingress', '--win-shortcut',

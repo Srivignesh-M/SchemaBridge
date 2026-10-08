@@ -4,6 +4,10 @@ For the Windows desktop application and setup EXE build instructions, see [WINDO
 
 For the smaller Windows package using an employee's installed Java 21+, see [SYSTEM-JAVA-README.txt](SYSTEM-JAVA-README.txt). Build it with `scripts/package-system-java.ps1`; this edition omits the bundled Java runtime.
 
+The private local transfer artifacts are described in [STAGING-FORMAT.md](STAGING-FORMAT.md); they are versioned with the saved plan format, not a public interchange format.
+
+For interrupted or uncertain jobs, follow the [migration recovery runbook](RECOVERY-RUNBOOK.md) before attempting any further writes.
+
 A standalone Java 21 / Spring Boot application for Oracle ↔ PostgreSQL table and data migration. Open the browser UI at **http://localhost:8098**. This module builds independently and is intentionally not added to the platform aggregator.
 
 ## Run

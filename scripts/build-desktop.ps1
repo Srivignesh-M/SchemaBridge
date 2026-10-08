@@ -17,8 +17,9 @@ if (!(Test-Path -LiteralPath $compiler)) { throw 'The Windows .NET Framework C# 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 Copy-Item -LiteralPath $core,$forms,$loader -Destination $OutputDirectory
 $source = Join-Path (Split-Path $PSScriptRoot -Parent) 'desktop/FingressDesktop.cs'
+$icon = Join-Path (Split-Path $PSScriptRoot -Parent) 'src/main/resources/static/images/schemabridge.ico'
 $hostExecutable = Join-Path $OutputDirectory 'FingressDesktop.exe'
-& $compiler /nologo /target:winexe /platform:x64 /optimize+ "/out:$hostExecutable" "/reference:$core" "/reference:$forms" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $source
+& $compiler /nologo /target:winexe /platform:x64 /optimize+ "/win32icon:$icon" "/out:$hostExecutable" "/reference:$core" "/reference:$forms" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $source
 if ($LASTEXITCODE -ne 0) { throw 'Desktop host compilation failed.' }
 $sdkVersion = [Reflection.AssemblyName]::GetAssemblyName($core).Version.ToString()
 @"
