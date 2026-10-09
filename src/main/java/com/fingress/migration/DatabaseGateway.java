@@ -187,6 +187,7 @@ public class DatabaseGateway {
         }
     }
     private Value defaultValue(String text, Dialect dialect) {
+        if(text!=null && Set.of("true","false").contains(text.trim().toLowerCase(Locale.ROOT)))return new Value(text.trim().toUpperCase(Locale.ROOT));
         if (text == null) return null;
         String value = text.trim();
         if (dialect == Dialect.POSTGRESQL) value = value.replaceFirst("::(?:character varying|text|bpchar|numeric|integer|bigint|smallint)$", "");
@@ -221,7 +222,8 @@ public class DatabaseGateway {
         String query="SELECT "+SqlWriter.names(source.columns().stream().map(Column::name).toList(),sourceDialect)+" FROM "+qualified(schema,source.name(),sourceDialect)+TableProjection.where(filterTable,selection,sourceDialect,values);
         Files.createFile(path);checkDisk(path,options);
         try(PreparedStatement statement=c.prepareStatement(query);BufferedWriter writer=Files.newBufferedWriter(path)){
-            progress.statement=statement;statement.setFetchSize(options.fetchSize());statement.setQueryTimeout(options.queryTimeoutSeconds());
+            if(selection!=null && selection.rowLimit()!=null)statement.setMaxRows(selection.rowLimit());
+            progress.statement=statement;statement.setFetchSize(selection!=null && selection.rowLimit()!=null?Math.min(options.fetchSize(),selection.rowLimit()):options.fetchSize());statement.setQueryTimeout(options.queryTimeoutSeconds());
             for(int i=0;i<values.size();i++)statement.setObject(i+1,values.get(i));
             try(ResultSet rs=statement.executeQuery()){
                 while(rs.next()){

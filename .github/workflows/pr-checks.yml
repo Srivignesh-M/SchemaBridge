@@ -32,3 +32,4 @@ jobs:
           node scripts/test-connection-ui.mjs
           node scripts/test-bulk-ui.mjs
           node scripts/test-catalog-ui.mjs
+          node scripts/test-table-settings-ui.mjs

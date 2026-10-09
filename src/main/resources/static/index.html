@@ -12,22 +12,14 @@
 <header>
   <a class="brand" href="/" aria-label="SchemaBridge home">S<span>↗</span></a>
   <div><strong>SchemaBridge</strong><span class="sub">SQL Migration Studio</span></div>
-  <span class="local">LOCAL WORKSPACE</span>
-</header>
-<main>
-  <div class="intro">
-    <span class="eyebrow">DATABASE TOOLS / MIGRATION</span>
-    <h1>Move your schema.<br><span>Keep control of your data.</span></h1>
-    <p>Choose a workflow, review every proposed change, then export or run it.</p>
-  </div>
-
   <nav class="steps" aria-label="Migration steps">
     <button type="button" data-step-nav="1" class="active" aria-current="step"><span>01</span> Workflow</button>
     <button type="button" data-step-nav="2" disabled><span>02</span> Configure</button>
     <button type="button" data-step-nav="3" disabled><span>03</span> Review</button>
     <button type="button" data-step-nav="4" disabled><span>04</span> Results</button>
   </nav>
-
+</header>
+<main>
   <form id="configuration">
     <section class="wizard-page" data-step-page="1">
       <div class="card">
@@ -91,7 +83,7 @@
       <div class="picker-header"><div><span class="eyebrow">SOURCE TABLES</span><h2 id="tablePickerTitle">Choose tables and names</h2><p class="muted">Select what to transfer. You can give each selected table a different name in the destination.</p></div><button type="button" id="closeTablePicker" class="icon-button" aria-label="Close table picker">×</button></div>
       <div class="table-picker-grid">
         <section class="picker-list" aria-label="Available tables"><label>Search tables<input id="tableSearch" type="search" placeholder="Filter by table name"></label><label class="select-all inline"><input id="selectAllTables" type="checkbox"> Select all visible</label><div id="tablePickerList" class="table-picker-list"></div></section>
-        <section class="picker-mappings"><h3>Destination table names and column options</h3><p class="muted">Select your tables, then load their settings to edit destination names or filters.</p><button type="button" id="configureColumns" class="secondary">Load settings for selected tables</button><div id="columnOptions"></div></section>
+        <section class="picker-mappings"><h3>Destination table names and column options</h3><p class="muted">Up to 500 tables. Open a selected table to rename columns, add filters, or limit rows. All rows and columns are included by default.</p><div id="columnOptions"></div></section>
       </div>
       <div class="picker-footer"><p id="pickerCount" class="muted" role="status" aria-live="polite">No tables selected.</p><div><button type="button" id="cancelTablePicker" class="secondary">Cancel</button><button type="button" id="applyTablePicker">Use selected tables</button></div></div>
     </dialog>

@@ -160,6 +160,7 @@ final class RevertRows {
                 String actual = switch (kind) {
                     case "DECIMAL", "INTEGER", "BIGINT", "SMALLINT" -> r.getBigDecimal(index).toPlainString();
                     case "TIMESTAMP" -> r.getTimestamp(index).toLocalDateTime().toString();
+                    case "BOOLEAN" -> Boolean.toString(r.getBoolean(index));
                     case "DATE" -> r.getDate(index).toLocalDate().toString();
                     case "TIMESTAMPTZ" -> r.getObject(index, OffsetDateTime.class).toString();
                     default -> r.getString(index);

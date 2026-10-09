@@ -58,6 +58,7 @@ record DataFingerprint(long count, BigInteger sum) {
                         else {value.update((byte)1);String text=switch(kind){
                             case "DECIMAL","INTEGER","SMALLINT","BIGINT" -> rs.getBigDecimal(index).toPlainString();
                             case "TIMESTAMP" -> rs.getTimestamp(index).toLocalDateTime().toString();
+                            case "BOOLEAN" -> Boolean.toString(rs.getBoolean(index));
                             case "DATE" -> rs.getDate(index).toLocalDate().toString();
                             case "TIMESTAMPTZ" -> rs.getObject(index,OffsetDateTime.class).toString();
                             default -> rs.getString(index);

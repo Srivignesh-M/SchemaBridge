@@ -36,6 +36,30 @@ class TransferFeaturesTest {
         throw new AssertionError("Job timed out: "+job);
     }
     JobView run(PlanView plan,Action action)throws Exception {assertTrue(plan.issues().isEmpty(),plan.issues().toString());return await(service.execute(plan.id(),new ExecuteRequest(target,Map.of("items",action))));}
+    @Test void multipleBooleanFiltersAndOptionalRowLimit()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY, active BOOLEAN DEFAULT FALSE, label VARCHAR(100)); INSERT INTO items VALUES(1,TRUE,'keep'),(2,FALSE,'keep'),(3,TRUE,'keep'),(4,TRUE,'other')");
+        var filters=List.of(new RowFilter("active","=","true"),new RowFilter("label","=","keep"));
+        var selection=new TableSelection(null,null,filters,null,1);
+        PlanView plan=service.create(request(false,Map.of("items",selection),MigrationOptions.defaults()));
+        assertEquals(1,plan.tables().getFirst().rows());
+        assertEquals("SUCCEEDED",run(plan,Action.CREATE_AND_LOAD).state());
+        try(Connection c=DriverManager.getConnection(targetUrl);Statement st=c.createStatement();ResultSet r=st.executeQuery("SELECT active,label FROM items")){assertTrue(r.next());assertTrue(r.getBoolean(1));assertEquals("keep",r.getString(2));assertFalse(r.next());}
+        var unlimited=new TableSelection(null,null,filters);
+        assertEquals(2,service.create(request(false,Map.of("items",unlimited),MigrationOptions.defaults())).tables().getFirst().rows());
+        assertThrows(IllegalArgumentException.class,()->new TableSelection(null,null,null,null,0));
+        var invalid=new TableSelection(null,null,List.of(new RowFilter("active","=","maybe")));
+        assertFalse(service.create(request(false,Map.of("items",invalid),MigrationOptions.defaults())).issues().isEmpty());
+    }
+    @Test void acceptsFiveHundredTablesAndRejectsFiveHundredOne()throws Exception {
+        var tables=new ArrayList<String>();
+        try(Connection c=DriverManager.getConnection(sourceUrl);Statement st=c.createStatement()){
+            for(int i=0;i<500;i++){String name="table_"+i;tables.add(name);st.execute("CREATE TABLE "+name+"(id INTEGER)");}
+        }
+        var request=new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",tables,false,null,MigrationOptions.defaults(),Map.of(),true);
+        assertEquals(500,service.create(request).tables().size());
+        tables.add("table_500");
+        assertTrue(assertThrows(IllegalArgumentException.class,()->service.create(request)).getMessage().contains("500 source tables"));
+    }
     @Test void mapsSelectedColumnsAndUsesParameterizedFilters()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY, label VARCHAR(100), omitted VARCHAR(10)); INSERT INTO items VALUES(1,'first','x'),(2,'second','y')");
         var selection=new TableSelection(List.of("id","label"),Map.of("label","display name"),List.of(new RowFilter("id",">=","2")));

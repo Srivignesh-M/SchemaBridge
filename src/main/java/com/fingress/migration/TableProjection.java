@@ -41,6 +41,7 @@ final class TableProjection {
                 if(filter.value()==null)throw new IllegalArgumentException("Filter value is required");
                 Object value=switch(column.type().kind()) {
                     case "DECIMAL","INTEGER","SMALLINT","BIGINT" -> new java.math.BigDecimal(filter.value());
+                    case "BOOLEAN" -> { if(!Set.of("true","false").contains(filter.value()))throw new IllegalArgumentException("Boolean filter must be true or false"); yield Boolean.valueOf(filter.value()); }
                     case "DATE" -> java.sql.Date.valueOf(filter.value());
                     case "TIMESTAMP" -> Timestamp.valueOf(filter.value().replace('T',' '));
                     case "TIMESTAMPTZ" -> java.time.OffsetDateTime.parse(filter.value());

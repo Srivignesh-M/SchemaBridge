@@ -26,6 +26,7 @@ public final class Model {
                 case "BIGINT" -> dialect == Dialect.ORACLE ? "NUMBER(19,0)" : "BIGINT";
                 case "TEXT" -> dialect == Dialect.ORACLE ? "CLOB" : "TEXT";
                 case "BINARY" -> dialect == Dialect.ORACLE ? (precision == null ? "BLOB" : "RAW(" + precision + ")") : "BYTEA";
+                case "BOOLEAN" -> { if(dialect==Dialect.ORACLE)throw new IllegalArgumentException("Boolean columns require an explicit Oracle mapping"); yield "BOOLEAN"; }
                 case "DATE" -> "DATE";
                 case "TIMESTAMP" -> "TIMESTAMP(" + (precision == null ? 6 : precision) + ")";
                 case "TIMESTAMPTZ" -> "TIMESTAMP(" + (precision == null ? 6 : precision) + ") WITH TIME ZONE";
@@ -33,6 +34,7 @@ public final class Model {
             };
         }
         public Type target(Dialect dialect) {
+            if(kind.equals("BOOLEAN") && dialect==Dialect.ORACLE)throw new IllegalArgumentException("Boolean columns require an explicit Oracle mapping");
             if (Set.of("TIMESTAMP", "TIMESTAMPTZ").contains(kind) && precision != null && (precision < 0 || precision > 6)) throw new IllegalArgumentException("Timestamp precision requires an explicit mapping to the supported 0-6 range");
             if (Set.of("VARCHAR", "CHAR").contains(kind) && (precision == null || precision < 1 || precision > 10_485_760)) throw new IllegalArgumentException("Unbounded or oversized character types require an explicit mapping");
             if (dialect == Dialect.POSTGRESQL && kind.equals("DECIMAL") && precision != null && (precision > 1000 || precision < 1 || scale != null && Math.abs((long) scale) > 1000)) throw new IllegalArgumentException("Numeric precision/scale exceeds PostgreSQL limits");
@@ -78,7 +80,9 @@ public final class Model {
         }
     }
     public record RowFilter(String column, String operator, String value) {}
-    public record TableSelection(List<String> columns, Map<String,String> rename, List<RowFilter> filters, String tableName) {
+    public record TableSelection(List<String> columns, Map<String,String> rename, List<RowFilter> filters, String tableName, Integer rowLimit) {
+        public TableSelection { if(rowLimit!=null && rowLimit<1)throw new IllegalArgumentException("Table row limit must be positive"); }
+        public TableSelection(List<String> columns, Map<String,String> rename, List<RowFilter> filters, String tableName) { this(columns,rename,filters,tableName,null); }
         public TableSelection(List<String> columns, Map<String,String> rename, List<RowFilter> filters) { this(columns, rename, filters, null); }
     }
     public enum Status { NEW, MATCH, MISMATCH, UNCHECKED }

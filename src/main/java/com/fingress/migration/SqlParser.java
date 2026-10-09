@@ -166,6 +166,7 @@ public final class SqlParser {
             case "INT2", "SMALLINT" -> new Type("SMALLINT", null, null);
             case "INT4", "INTEGER" -> new Type("INTEGER", null, null);
             case "INT8", "BIGINT" -> new Type("BIGINT", null, null);
+            case "BOOLEAN", "BOOL" -> new Type("BOOLEAN", null, null);
             case "TEXT", "CLOB", "CHARACTER LARGE OBJECT" -> new Type("TEXT", null, null);
             case "BYTEA", "BLOB", "BINARY LARGE OBJECT", "BINARY VARYING" -> new Type("BINARY", null, null);
             case "RAW" -> new Type("BINARY", size, null);

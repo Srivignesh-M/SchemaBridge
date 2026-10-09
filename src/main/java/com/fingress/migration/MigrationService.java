@@ -179,7 +179,7 @@ public class MigrationService implements AutoCloseable {
     }
     private void fromDatabase(PlanRequest request, Plan plan, List<String> issues) throws Exception {
         if (request.source().dialect() != request.sourceDialect()) throw new IllegalArgumentException("Source connection type differs from selected source dialect");
-        if (request.tables() == null || request.tables().isEmpty() || request.tables().size() > 100) throw new IllegalArgumentException("Select between 1 and 100 source tables");
+        if (request.tables() == null || request.tables().isEmpty() || request.tables().size() > 500) throw new IllegalArgumentException("Select between 1 and 500 source tables");
         if (request.sourceSchema() == null || request.sourceSchema().isBlank()) throw new IllegalArgumentException("Select the source schema");
         try (Connection connection = db.connect(request.source())) {
             db.snapshot(connection, request.sourceDialect()); long remaining = plan.options.maxRows();

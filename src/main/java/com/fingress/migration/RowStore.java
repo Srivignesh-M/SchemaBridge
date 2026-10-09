@@ -60,6 +60,7 @@ final class RowStore {
             if(object==null){row[i]=new Cell(kind,null,null);continue;}
             String value=switch(kind) {
                 case "DECIMAL","INTEGER","SMALLINT","BIGINT" -> rs.getBigDecimal(index).toPlainString();
+                case "BOOLEAN" -> Boolean.toString(rs.getBoolean(index));
                 case "DATE" -> rs.getDate(index).toLocalDate().toString();
                 case "TIMESTAMP" -> rs.getTimestamp(index).toLocalDateTime().toString();
                 case "TIMESTAMPTZ" -> rs.getObject(index,OffsetDateTime.class).toString();
@@ -101,6 +102,7 @@ final class RowStore {
             switch(kind){
                 case "DECIMAL","INTEGER","SMALLINT","BIGINT" -> statement.setBigDecimal(index,new BigDecimal(cell.value()));
                 case "BINARY" -> statement.setBytes(index,Base64.getDecoder().decode(cell.value()));
+                case "BOOLEAN" -> statement.setBoolean(index,Boolean.parseBoolean(cell.value()));
                 case "DATE" -> statement.setDate(index,java.sql.Date.valueOf(cell.value()));
                 case "TIMESTAMP" -> statement.setTimestamp(index,java.sql.Timestamp.valueOf(LocalDateTime.parse(cell.value())));
                 case "TIMESTAMPTZ" -> statement.setObject(index,OffsetDateTime.parse(cell.value()));
@@ -110,6 +112,7 @@ final class RowStore {
     }
     static int jdbcType(String kind,Dialect dialect){return switch(kind){
         case "DECIMAL","INTEGER","SMALLINT","BIGINT" -> Types.NUMERIC;
+        case "BOOLEAN" -> Types.BOOLEAN;
         case "DATE" -> Types.DATE; case "TIMESTAMP" -> Types.TIMESTAMP;case "TIMESTAMPTZ" -> Types.TIMESTAMP_WITH_TIMEZONE;
         case "TEXT" -> dialect==Dialect.ORACLE?Types.CLOB:Types.VARCHAR;case "BINARY" -> dialect==Dialect.ORACLE?Types.BLOB:Types.VARBINARY;default -> Types.VARCHAR;
     };}
@@ -148,6 +151,7 @@ final class RowStore {
         switch(cell.type()){
             case "DECIMAL","INTEGER","SMALLINT","BIGINT" -> write(out,new BigDecimal(value).toPlainString());
             case "BINARY" -> write(out,(dialect==Dialect.ORACLE?"HEXTORAW('":"decode('")+HexFormat.of().formatHex(Base64.getDecoder().decode(value))+(dialect==Dialect.ORACLE?"')":"','hex')"));
+            case "BOOLEAN" -> write(out,Boolean.parseBoolean(value)?"TRUE":"FALSE");
             case "DATE" -> write(out,"DATE '"+value+"'");
             case "TIMESTAMP" -> write(out,"TIMESTAMP '"+value.replace('T',' ')+"'");
             case "TIMESTAMPTZ" -> write(out,dialect==Dialect.POSTGRESQL?"TIMESTAMP WITH TIME ZONE '"+value.replace('T',' ')+"'":"TO_TIMESTAMP_TZ('"+OffsetDateTime.parse(value).format(java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSSSSSxxx"))+"','YYYY-MM-DD HH24:MI:SS.FF9TZH:TZM')");
