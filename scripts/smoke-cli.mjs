@@ -4,7 +4,10 @@ import {mkdtemp,writeFile,mkdir,readdir,readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 const moduleRoot=fileURLToPath(new URL('..',import.meta.url));
-const jar=path.join(moduleRoot,'target/fg-sql-migration-1.0.0-SNAPSHOT.jar');
+const targetDir=path.join(moduleRoot,'target');
+const jarNames=(await readdir(targetDir)).filter(name=>/^fg-sql-migration-.*\.jar$/.test(name));
+assert.equal(jarNames.length,1,`Expected exactly one fg-sql-migration-*.jar in target/, found: ${jarNames.join(', ')||'(none)'}`);
+const jar=path.join(targetDir,jarNames[0]);
 const work=await mkdtemp(path.join(moduleRoot,'target/cli-smoke-'));
 function run(...args){return spawnSync('java',['-jar',jar,'cli',...args],{cwd:work,encoding:'utf8',timeout:30000});}
 let result=run('help');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/No web server/);assert.doesNotMatch(result.stdout,/Tomcat|Spring Boot/);

@@ -173,7 +173,8 @@ public final class SqlParser {
             case "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE" -> new Type("TIMESTAMP", scale, null);
             case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE" -> new Type("TIMESTAMPTZ", scale, null);
             default -> {
-                if (name.matches("TIMESTAMP\\(\\d\\)")) yield new Type("TIMESTAMP", Integer.parseInt(name.substring(10, 11)), null);
+                var timestamp = java.util.regex.Pattern.compile("TIMESTAMP\\(([0-9])\\)( WITH TIME ZONE)?").matcher(name);
+                if (timestamp.matches()) yield new Type(timestamp.group(2) == null ? "TIMESTAMP" : "TIMESTAMPTZ", Integer.parseInt(timestamp.group(1)), null);
                 throw new IllegalArgumentException("Unsupported catalog type: " + type);
             }
         };

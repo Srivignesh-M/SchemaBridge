@@ -1,5 +1,9 @@
 # Windows application
 
+## Browser edition
+
+`dist/Fingress-SQL-Migration-1.0.0-Browser.zip` contains the current application JAR and a trimmed Java runtime. Extract it, run `Start SchemaBridge.bat`, then open `http://localhost:8098`. Keep its command window open while working. History and logs live under `%LOCALAPPDATA%\Fingress SQL Migration`. Build or refresh it with `./scripts/package-browser.ps1`.
+
 ## Smaller package using installed Java
 
 `dist/Fingress-SQL-Migration-1.0.0-System-Java.zip` omits the Java runtime. Extract it and launch `Fingress SQL Migration.exe`; keep its `app` directory beside it. The native launcher checks `JAVA_HOME/bin/java.exe` first, then Java installations on `PATH`, accepting Java 21 or newer. Invalid or older installations fall back to the next candidate. If no compatible Java is found, it shows instructions. Users still need Windows x64, .NET Framework 4.8 and WebView2 Runtime for the embedded interface. Share the entire ZIP.

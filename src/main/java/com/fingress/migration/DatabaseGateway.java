@@ -57,6 +57,16 @@ public class DatabaseGateway {
         }
         return result.stream().sorted().toList();
     }
+    public String objectIdentity(Connection connection,String schema,String table,Dialect dialect)throws SQLException{
+        if(connection.getMetaData().getDatabaseProductName().equals("H2"))return "H2-test-fixture";
+        String query=dialect==Dialect.POSTGRESQL
+                ?"SELECT c.oid::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=? AND c.relname=? AND c.relkind='r'"
+                :"SELECT TO_CHAR(object_id) FROM all_objects WHERE owner=? AND object_name=? AND object_type='TABLE'";
+        try(PreparedStatement statement=connection.prepareStatement(query)){
+            statement.setQueryTimeout(30);statement.setString(1,schema);statement.setString(2,table);
+            try(ResultSet result=statement.executeQuery()){if(!result.next())throw new IllegalArgumentException("Cannot verify target table identity: "+table);return result.getString(1);}
+        }
+    }
     public Long estimateRows(Connection connection,String schema,String table,Dialect dialect) {
         String query=dialect==Dialect.POSTGRESQL
                 ?"SELECT c.reltuples::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=? AND c.relname=? AND c.relkind IN ('r','p')"
@@ -119,7 +129,11 @@ public class DatabaseGateway {
                 if (!schema.equals(rs.getString("PKTABLE_SCHEM"))) throw new IllegalArgumentException("Cross-schema foreign key needs explicit mapping on " + name);
                 if (rs.getShort("DELETE_RULE") != DatabaseMetaData.importedKeyNoAction && rs.getShort("DELETE_RULE") != DatabaseMetaData.importedKeyRestrict)
                     throw new IllegalArgumentException("Foreign key delete action needs explicit mapping on " + name);
-                if (rs.getShort("UPDATE_RULE") != DatabaseMetaData.importedKeyNoAction && rs.getShort("UPDATE_RULE") != DatabaseMetaData.importedKeyRestrict)
+                short updateRule = rs.getShort("UPDATE_RULE");
+                // Oracle JDBC returns SQL NULL here: native Oracle FKs use UPDATE NO ACTION.
+                // getShort(NULL) returns zero, which is also JDBC's CASCADE constant.
+                if (rs.wasNull() && dialect == Dialect.ORACLE) updateRule = DatabaseMetaData.importedKeyNoAction;
+                if (updateRule != DatabaseMetaData.importedKeyNoAction && updateRule != DatabaseMetaData.importedKeyRestrict)
                     throw new IllegalArgumentException("Foreign key update action needs explicit mapping on " + name);
                 if (rs.getShort("DEFERRABILITY") != DatabaseMetaData.importedKeyNotDeferrable) throw new IllegalArgumentException("Deferrable constraints need explicit mapping on " + name);
                 String key = rs.getString("FK_NAME"); int sequence = rs.getInt("KEY_SEQ");

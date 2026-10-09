@@ -65,4 +65,10 @@ class SqlParserTest {
         assertTrue(parsed.issues().isEmpty(), parsed.issues().toString()); assertEquals("BIGINT", parsed.tables().getFirst().columns().getFirst().type().kind());
     }
     @Test void doesNotDiscardUnknownTypeModifiers() { assertFalse(parse("CREATE TABLE t (v INTEGER(8))").issues().isEmpty()); }
+    @Test void recognizesOracleJdbcTimestampPrecisionAndZone() {
+        assertEquals(new Type("TIMESTAMPTZ", 6, null), SqlParser.catalogType("TIMESTAMP(6) WITH TIME ZONE", 0, 0, Dialect.ORACLE));
+        assertEquals(new Type("TIMESTAMP", 3, null), SqlParser.catalogType("TIMESTAMP(3)", 0, 0, Dialect.ORACLE));
+        assertThrows(IllegalArgumentException.class, () -> SqlParser.catalogType("TIMESTAMP(9) WITH TIME ZONE", 0, 0, Dialect.ORACLE).target(Dialect.POSTGRESQL));
+        assertThrows(IllegalArgumentException.class, () -> SqlParser.catalogType("TIMESTAMP(6) WITH LOCAL TIME ZONE", 0, 0, Dialect.ORACLE));
+    }
 }

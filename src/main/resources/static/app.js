@@ -4,6 +4,41 @@ let plan = null, finalJob = null, polling = null, errorTimer = null, lastRequest
 const databaseNames = {source: {}, target: {}};
 const catalogSelection = {source:null,target:null};
 let catalogLoading = false;
+let pendingRevert = null;
+function revertBusy(job){return !!job?.revert && ['QUEUED','RUNNING'].includes(job.revert.state);}
+function jobBusy(job){return ['QUEUED','RUNNING'].includes(job.state)||revertBusy(job);}
+function clearRevertReview(){pendingRevert=null;$('revertReview').hidden=true;$('acknowledgeRevert').checked=false;$('confirmRevert').disabled=true;}
+function renderRevert(){
+  const r=finalJob?.revert;
+  $('revertSection').hidden=!finalJob||(finalJob.state!=='SUCCEEDED'&&!r);
+  if(pendingRevert&&(pendingRevert.jobId!==finalJob?.id||revertBusy(finalJob)))clearRevertReview();
+  const canReview=finalJob?.state==='SUCCEEDED'&&(!r||['FAILED','PARTIAL'].includes(r.state));
+  $('reviewRevert').hidden=!canReview;$('reviewRevert').disabled=false;$('cancelRevert').hidden=!revertBusy(finalJob);
+  $('revertState').textContent=r?`${r.state}: ${r.message} ${r.progress.rowsCommitted.toLocaleString()} rows removed by committed revert work.`:'Select Review revert to check this job against the target before removing anything.';
+  $('revertResults').replaceChildren();
+  for(const table of r?.tables||[]){const item=document.createElement('li');item.textContent=`${table.table}: ${table.status} · ${table.rows.toLocaleString()} original rows · ${table.action==='DROP_TABLE'?'drop migration-created table':'remove transferred rows'}`;$('revertResults').append(item);}
+}
+$('reviewRevert').addEventListener('click',async()=>{
+  const id=finalJob.id;clearRevertReview();$('reviewRevert').disabled=true;$('revertState').textContent='Checking target data and dependencies…';
+  try{
+    const review=await(await api('/jobs/'+id+'/revert-preview',connection('target'))).json();
+    if(finalJob?.id!==id)return;pendingRevert=review;
+    $('revertTarget').textContent=`Job ${review.jobId} · Target: ${review.target}`;
+    $('revertExpiry').textContent='Review expires at '+new Date(review.expiresAt).toLocaleTimeString()+'. The target is checked again when you confirm.';
+    $('revertTables').replaceChildren();
+    for(const table of review.tables){const item=document.createElement('li');item.textContent=`${table.table}: ${table.action==='DROP_TABLE'?'remove transferred rows and drop table':'remove only transferred rows'} · ${table.rows.toLocaleString()} original rows · ${table.status}`;$('revertTables').append(item);}
+    $('revertReview').hidden=false;$('revertState').textContent='Review the removal below. Nothing has been removed.';$('revertReview').scrollIntoView({behavior:'smooth',block:'center'});
+  }catch(e){$('revertState').textContent=e.message;error(e.message);}finally{$('reviewRevert').disabled=false;}
+});
+$('acknowledgeRevert').addEventListener('change',()=>{$('confirmRevert').disabled=!pendingRevert||!$('acknowledgeRevert').checked;});
+$('dismissRevert').addEventListener('click',()=>{clearRevertReview();renderRevert();});
+$('confirmRevert').addEventListener('click',async()=>{
+  if(!pendingRevert||!$('acknowledgeRevert').checked||pendingRevert.jobId!==finalJob.id)return;
+  const review=pendingRevert;$('confirmRevert').disabled=true;
+  try{finalJob=await(await api('/jobs/'+review.jobId+'/revert',{target:connection('target'),token:review.token})).json();clearRevertReview();renderJob();pollJob();}
+  catch(e){clearRevertReview();$('revertState').textContent=e.message;error(e.message);}
+});
+$('cancelRevert').addEventListener('click',async()=>{try{finalJob=await(await api('/jobs/'+finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
 function setCatalogMode(prefix, selection) {
   catalogSelection[prefix] = selection;
   $(prefix+'Dialect').disabled = !!selection;
@@ -110,6 +145,7 @@ function goToStep(step, scroll=true) {
   if (scroll) window.scrollTo({top:0,behavior:'smooth'});
 }
 function invalidate() {
+  clearRevertReview();
   requestVersion++; lastRequest=null; plan = null; maxStep=Math.min(maxStep,2);
   if ($('reportSection')) $('reportSection').hidden = true;
   if ($('outputActions')) $('outputActions').hidden = true;
@@ -190,9 +226,37 @@ function renderPlan() {
     for (const statement of statements) { const row = document.createElement('tr'); cell(row, statement.number); cell(row, statement.kind); cell(row, statement.status); cell(row, statement.messages.join(' · ') || 'Converted. See the full preview below.'); $('statementRows').append(row); }
   }
   for (const [messages, kind] of [[plan.issues,'issue'],[plan.warnings,'warning']]) for (const text of messages) { const p = document.createElement('p'); p.className = 'message ' + kind; p.textContent = text; $('reportMessages').append(p); }
+  const maxRows = plan.options && plan.options.maxRows;
+  if (maxRows && !plan.orderedScript) {
+    const totalRows = plan.tables.reduce((sum,t) => sum + (t.rows||0), 0);
+    const hasUnextracted = plan.tables.some(t => (t.rows||0)===0 && t.estimatedRows!=null);
+    $('quotaSummary').textContent = plan.prepared===false
+      ? `Row budget: ${maxRows.toLocaleString()} total across this plan. Per-table counts are not yet extracted.`
+      : `Row budget used: ${totalRows.toLocaleString()} / ${maxRows.toLocaleString()} (${((totalRows/maxRows)*100).toFixed(1)}%)${hasUnextracted?' — some tables show an estimate only':''}.`;
+  } else $('quotaSummary').textContent = '';
+  const findingKindLabel = {MISSING_TARGET_COLUMN:'Missing column',EXTRA_TARGET_COLUMN:'Extra column',TYPE_MISMATCH:'Type mismatch',NULLABILITY_MISMATCH:'Nullability',IDENTITY_MISMATCH:'Identity',DEFAULT_MISMATCH:'Default value',KEY_OR_INDEX_MISMATCH:'Keys/indexes',ORACLE_IDENTITY_DML_BLOCKED:'Identity + DML only'};
   for (const table of plan.tables) {
-    const tr = document.createElement('tr'); cell(tr,table.table); const status = cell(tr,''); const badge = document.createElement('span'); badge.className = 'badge ' + table.status; badge.textContent = ({NEW:'New table',MATCH:'Already exists · match',MISMATCH:'Already exists / review',UNCHECKED:'Not inspected'})[table.status]; status.append(badge); const rowSummary=plan.prepared===false?(table.estimatedRows==null?'Not extracted; estimate unavailable':`~${table.estimatedRows.toLocaleString()} estimated (not extracted)`):`${table.rows.toLocaleString()} extracted`; cell(tr,rowSummary);
-    cell(tr,[...table.differences,...table.warnings].join(' · ') || (table.status === 'MATCH' ? 'Definitions match. DML-only is available.' : 'Ready for selected action.'));
+    const tr = document.createElement('tr'); cell(tr,table.table); const status = cell(tr,''); const badge = document.createElement('span'); badge.className = 'badge ' + table.status; badge.textContent = ({NEW:'New table',MATCH:'Already exists · match',MISMATCH:'Already exists / review',UNCHECKED:'Not inspected'})[table.status]; status.append(badge);
+    const rowSummary=plan.prepared===false?(table.estimatedRows==null?'Not extracted; estimate unavailable':`~${table.estimatedRows.toLocaleString()} estimated (not extracted)`):`${table.rows.toLocaleString()} extracted`;
+    const rowCell = cell(tr, rowSummary);
+    if (maxRows && table.rows) { const share = document.createElement('div'); share.className='muted'; share.textContent = `${((table.rows/maxRows)*100).toFixed(2)}% of budget`; rowCell.append(share); }
+    const findings = cell(tr, ''); findings.textContent = '';
+    if (table.dependsOn && table.dependsOn.length) { const dep = document.createElement('div'); dep.className='muted'; dep.textContent = 'Depends on: ' + table.dependsOn.join(', '); findings.append(dep); }
+    if (table.columnComparison && table.columnComparison.length) {
+      const list = document.createElement('ul'); list.className='column-comparison';
+      for (const d of table.columnComparison) {
+        const item = document.createElement('li');
+        const label = findingKindLabel[d.kind] || d.kind;
+        const strong = document.createElement('strong'); strong.textContent = d.column ? `${d.column} — ${label}` : label; item.append(strong);
+        if (d.expected!=null || d.actual!=null) item.append(document.createTextNode(` (expected ${d.expected!=null?d.expected:'—'}, target ${d.actual!=null?d.actual:'—'})`));
+        item.append(document.createElement('br'));
+        const correction = document.createElement('span'); correction.className='muted'; correction.textContent = d.correction; item.append(correction);
+        list.append(item);
+      }
+      findings.append(list);
+    } else if (table.differences.length || table.warnings.length) {
+      const p = document.createElement('div'); p.textContent = [...table.differences,...table.warnings].join(' · '); findings.append(p);
+    } else { const p = document.createElement('div'); p.textContent = table.status === 'MATCH' ? 'Definitions match. DML-only is available.' : 'Ready for selected action.'; findings.append(p); }
     const td = cell(tr,''); const select = document.createElement('select'); select.dataset.table = table.table;
     for(const action of table.allowedActions) { const option = document.createElement('option'); option.value = action; option.textContent = ({CREATE_AND_LOAD:'Create + load',DML_ONLY:'DML only',SKIP:'Skip table'})[action]; select.append(option); }
     select.value = table.status === 'MATCH' || table.status === 'MISMATCH' ? 'SKIP' : 'CREATE_AND_LOAD'; td.append(select); $('reportRows').append(tr);
@@ -213,8 +277,22 @@ $('download').addEventListener('click',async()=>{try{
 }catch(e){clearDownloadLink();error(e.message);}finally{$('download').disabled=false;}});
 $('downloadLink').addEventListener('click',()=>{setTimeout(()=>{clearDownloadLink();$('downloadStatus').textContent='Download requested. If it did not start, prepare a fresh link.';$('downloadHelp').hidden=false;},0);});
 $('execute').addEventListener('click',async()=>{ try { $('execute').disabled=true; finalJob=await(await api('/plans/'+plan.id+'/execute',{target:connection('target'),actions:actions()})).json(); $('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);$('execute').disabled=false;} });
-function renderJob(){ renderProgress('job',finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);$('resumeJob').hidden=!finalJob.resumable; $('jobState').textContent=finalJob.state+' — '+finalJob.message; $('jobRows').replaceChildren(); for(const table of finalJob.tables){const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows,table.message].forEach(value=>cell(tr,value));$('jobRows').append(tr);} }
-async function pollJob(){ clearTimeout(polling); try{finalJob=await(await api('/jobs/'+finalJob.id,undefined,'GET')).json();renderJob();if(['RUNNING','QUEUED'].includes(finalJob.state))polling=setTimeout(pollJob,1500);else refreshHistory();}catch(e){error(e.message);polling=setTimeout(pollJob,5000);} }
+const validationMethodLabel={FINGERPRINT:'Fingerprint (count + SHA-256)',ROW_COUNT:'Row count only',NONE:'No validation'};
+function renderJob(){ renderProgress('job',finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);$('resumeJob').hidden=!finalJob.resumable; $('jobState').textContent=finalJob.state+' — '+finalJob.message; $('jobRows').replaceChildren();
+  for(const table of finalJob.tables){
+    const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows].forEach(value=>cell(tr,value));
+    const details=cell(tr,'');
+    const v=table.validation;
+    if(v){
+      const summary=document.createElement('div');
+      const scope=v.method==='NONE'?(v.skippedReason||''):`${validationMethodLabel[v.method]||v.method} · ${v.rowsChecked.toLocaleString()} rows checked · ${v.durationSeconds.toFixed(2)}s`;
+      summary.textContent=scope; details.append(summary);
+    }
+    const message=document.createElement('div'); message.className='muted'; message.textContent=table.message; details.append(message);
+    $('jobRows').append(tr);
+  }
+  renderRevert(); }
+async function pollJob(){ clearTimeout(polling); try{finalJob=await(await api('/jobs/'+finalJob.id,undefined,'GET')).json();renderJob();if(jobBusy(finalJob))polling=setTimeout(pollJob,1500);else refreshHistory();}catch(e){error(e.message);polling=setTimeout(pollJob,5000);} }
 $('jobDownload').addEventListener('click',()=>save(new Blob([JSON.stringify(finalJob,null,2)],{type:'application/json'}),'execution-report.json'));
 function transferOptions(){return {maxRows:Number($('maxRows').value),maxTableBytes:Math.round(Number($('maxTableGb').value)*1e9),diskReserveBytes:Math.round(Number($('diskReserveMb').value)*1e6),fetchSize:Number($('fetchSize').value),batchRows:Number($('batchRows').value),batchBytes:Math.round(Number($('batchMb').value)*1e6),queryTimeoutSeconds:Number($('queryTimeout').value),readTimeoutSeconds:Number($('readTimeout').value),validateData:$('validateData').checked,useCopy:$('useCopy').checked};}
 function renderProgress(prefix,p){if(!p)return;const phases={QUEUED:'Queued',PREPARING:'Preparing',EXTRACTING:'Reading source',CHECKING:'Checking target and staged data',CREATING:'Creating tables',LOADING:'Loading data',FINALIZING:'Adding indexes and constraints',SUCCEEDED:'Complete',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'};$(`${prefix}Phase`).textContent=phases[p.phase]||p.phase||'Waiting';$(`${prefix}Table`).textContent=p.table?`Table: ${p.table}`:'';$(`${prefix}Read`).textContent=Number(p.rowsRead||0).toLocaleString();$(`${prefix}Sent`).textContent=prefix==='preparation'?'—':Number(p.rowsSent||0).toLocaleString();$(`${prefix}Committed`).textContent=prefix==='preparation'?'—':Number(p.rowsCommitted||0).toLocaleString();$(`${prefix}Bytes`).textContent=formatBytes(p.bytes);$(`${prefix}Elapsed`).textContent=formatDuration(p.elapsedSeconds);$(`${prefix}Rate`).textContent=Number(p.rowsPerSecond)>0?`${Math.round(p.rowsPerSecond).toLocaleString()} rows/s`:'—';$(`${prefix}Eta`).textContent=p.remainingSeconds==null?'—':formatDuration(p.remainingSeconds);}
@@ -238,13 +316,26 @@ function jobStateLabel(state){return ({QUEUED:'Queued',RUNNING:'Running',SUCCEED
 function jobHistoryCard(job){
   const card=document.createElement('article');card.className='history-card';card.setAttribute('role','listitem');
   const heading=document.createElement('div');heading.className='history-card-heading';
-  const state=document.createElement('span');state.className='history-state state-'+job.state.toLowerCase().replaceAll('_','-');state.textContent=jobStateLabel(job.state);
+  const displayState=job.revert?.state||job.state;
+  const state=document.createElement('span');state.className='history-state state-'+displayState.toLowerCase().replaceAll('_','-');state.textContent=job.revert?(displayState==='REVERTED'?'Reverted':'Revert: '+jobStateLabel(displayState)):jobStateLabel(job.state);
   const id=document.createElement('code');id.textContent=job.id.slice(0,8);heading.append(state,id);card.append(heading);
   const summary=document.createElement('p');const committed=Number(job.progress?.rowsCommitted||0);summary.className='history-summary';summary.textContent=`${job.tables.length} table${job.tables.length===1?'':'s'} · ${committed.toLocaleString()} ${job.state==='RECOVERY_REQUIRED'?'rows recorded committed':'rows committed'}`;card.append(summary);
-  const detail=document.createElement('p');detail.className='history-detail';detail.textContent=job.message;card.append(detail);
+  const detail=document.createElement('p');detail.className='history-detail';detail.textContent=job.revert?.message||job.message;card.append(detail);
   const actions=document.createElement('div');actions.className='history-actions';
-  const view=document.createElement('button');view.className='secondary';view.textContent='View report';view.addEventListener('click',async()=>{try{clearTimeout(polling);finalJob=job;$('jobSection').hidden=false;renderJob();plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(['RUNNING','QUEUED'].includes(job.state))pollJob();maxStep=4;goToStep(4);}catch(e){error(e.message);}});actions.append(view);
-  if(!['RUNNING','QUEUED'].includes(job.state)){const remove=document.createElement('button');remove.className='secondary';remove.textContent='Delete saved files';remove.addEventListener('click',async()=>{if(!window.confirm('Delete this saved migration and its exported data? Target database rows will remain.'))return;remove.disabled=true;try{await api('/plans/'+job.planId,undefined,'DELETE');if(finalJob?.id===job.id){clearTimeout(polling);$('jobSection').hidden=true;}if(plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}});actions.append(remove);}
+  const view=document.createElement('button');view.className='secondary';view.textContent='View report / revert';view.addEventListener('click',async()=>{try{clearTimeout(polling);clearRevertReview();finalJob=await(await api('/jobs/'+job.id,undefined,'GET')).json();$('jobSection').hidden=false;renderJob();plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(jobBusy(finalJob))pollJob();maxStep=4;goToStep(4);}catch(e){error(e.message);}});actions.append(view);
+  if(!jobBusy(job)){
+    const uncertain=job.state==='RECOVERY_REQUIRED'||['PARTIAL','RECOVERY_REQUIRED'].includes(job.revert?.state);
+    const remove=document.createElement('button');remove.className=uncertain?'secondary danger':'secondary';remove.textContent=uncertain?'Review and discard evidence':'Delete saved files';
+    remove.addEventListener('click',async()=>{
+      const prompt=uncertain
+        ?'This job\'s commit outcome is uncertain — these files are the evidence needed to reconcile the target (see RECOVERY-RUNBOOK.md). Only discard them after you have manually verified and reconciled the target database. Discard anyway?'
+        :'Delete this saved migration and its exported data? Target database rows will remain.';
+      if(!window.confirm(prompt))return;
+      remove.disabled=true;
+      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');if(finalJob?.id===job.id){clearTimeout(polling);$('jobSection').hidden=true;$('revertSection').hidden=true;clearRevertReview();}if(plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
+    });
+    actions.append(remove);
+  }
   card.append(actions);return card;
 }
 async function refreshHistory(){
@@ -256,6 +347,47 @@ async function refreshHistory(){
   finally{button.disabled=false;}
 }
 $('refreshHistory').addEventListener('click',refreshHistory);
+async function refreshStorage(){
+  const button=$('refreshStorage');button.disabled=true;
+  try{
+    const s=await(await api('/storage',undefined,'GET')).json();
+    const metrics=$('storageMetrics');metrics.replaceChildren();
+    for(const [label,value] of [['Staged data',formatBytes(s.stagedBytes)],['Free disk',formatBytes(s.freeDiskBytes)],['Reclaimable on next cleanup',formatBytes(s.reclaimableBytes)],['Saved plans',String(s.plans.length)]]){
+      const div=document.createElement('div');const dt=document.createElement('dt');dt.textContent=label;const dd=document.createElement('dd');dd.textContent=value;div.append(dt,dd);metrics.append(div);
+    }
+    const orphans=$('storageOrphans');
+    if(s.orphanedDirectories.length){orphans.hidden=false;orphans.textContent=`${s.orphanedDirectories.length} orphaned work-directory folder${s.orphanedDirectories.length===1?'':'s'} found with no matching saved plan (left over from an interrupted run). Review and remove manually if no longer needed.`;}
+    else orphans.hidden=true;
+  }catch(e){error(e.message);}
+  finally{button.disabled=false;}
+}
+$('refreshStorage').addEventListener('click',refreshStorage);
+function settingsProfile(){
+  const value=id=>$(id)?$(id).value:undefined;
+  return {version:1,sourceDialect:value('sourceDialect'),targetDialect:value('targetDialect'),targetSchema:value('targetSchema'),
+    source:{host:value('sourceHost'),port:value('sourcePort'),database:value('sourceDatabase'),username:value('sourceUsername')},
+    target:{host:value('targetHost'),port:value('targetPort'),database:value('targetDatabase'),username:value('targetUsername')},
+    options:{maxRows:value('maxRows'),maxTableGb:value('maxTableGb'),diskReserveMb:value('diskReserveMb'),fetchSize:value('fetchSize'),batchRows:value('batchRows'),batchMb:value('batchMb'),queryTimeout:value('queryTimeout'),readTimeout:value('readTimeout'),validateData:$('validateData')?.checked,useCopy:$('useCopy')?.checked}};
+}
+$('exportSettings').addEventListener('click',()=>{save(new Blob([JSON.stringify(settingsProfile(),null,2)],{type:'application/json'}),'schemabridge-settings.json');});
+$('importSettings').addEventListener('change',async()=>{
+  const file=$('importSettings').files[0];if(!file)return;
+  try{
+    const p=JSON.parse(await file.text());
+    if(p.sourceDialect&&$('sourceDialect'))$('sourceDialect').value=p.sourceDialect;
+    if(p.targetDialect&&$('targetDialect'))$('targetDialect').value=p.targetDialect;
+    if(p.targetSchema!=null&&$('targetSchema'))$('targetSchema').value=p.targetSchema;
+    for(const prefix of ['source','target']){const side=p[prefix];if(!side)continue;
+      for(const field of ['Host','Port','Database','Username'])if(side[field.toLowerCase()]!=null&&$(prefix+field))$(prefix+field).value=side[field.toLowerCase()];
+    }
+    if(p.options)for(const [key,id] of [['maxRows','maxRows'],['maxTableGb','maxTableGb'],['diskReserveMb','diskReserveMb'],['fetchSize','fetchSize'],['batchRows','batchRows'],['batchMb','batchMb'],['queryTimeout','queryTimeout'],['readTimeout','readTimeout']])if(p.options[key]!=null&&$(id))$(id).value=p.options[key];
+    if(p.options&&$('validateData'))$('validateData').checked=!!p.options.validateData;
+    if(p.options&&$('useCopy'))$('useCopy').checked=!!p.options.useCopy;
+    invalidate();
+    $('configStatus').textContent='Settings imported. Passwords were not included — enter them before connecting.';
+  }catch(e){error('Could not import settings: '+e.message);}
+  finally{$('importSettings').value='';}
+});
 function selectedSourceTables(){return Array.from($('sourceTables').selectedOptions).map(option=>option.value);}
 function renderTablePicker(){
   if(!$('tablePickerList'))return;
@@ -315,4 +447,4 @@ $('selectAllTables').addEventListener('change',()=>{
   $('sourceTables').dispatchEvent(new Event('change',{bubbles:true}));updateTablePickerSummary();
 });
 async function loadBuildVersion(){try{const response=await api('/capabilities',undefined,'GET');const info=await response.json();$('buildVersion').textContent='Version '+info.version;}catch(_){$('buildVersion').textContent='Version unavailable';}}
-updateFlow();refreshHistory();loadBuildVersion();
+updateFlow();refreshHistory();refreshStorage();loadBuildVersion();

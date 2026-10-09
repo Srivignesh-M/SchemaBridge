@@ -5,21 +5,60 @@ import static com.fingress.migration.Model.*;
 
 public final class Compatibility {
     private Compatibility() {}
-    public static List<String> differences(Table source, Table target, Dialect dialect) {
-        List<String> differences = new ArrayList<>();
+
+    /** Structured column-by-column comparison for the P3 actionable-preflight report: each entry names
+     * the column, categorizes the mismatch kind, carries both sides' values, and an actionable correction. */
+    public static List<ColumnDifference> structuredDifferences(Table source, Table target, Dialect dialect) {
+        List<ColumnDifference> result = new ArrayList<>();
         Map<String, Column> expected = columns(source, dialect), actual = columns(target, dialect);
         for (Map.Entry<String, Column> entry : expected.entrySet()) {
             String name = entry.getKey(); Column from = entry.getValue(), to = actual.get(name);
-            if (to == null) { differences.add("Missing target column: " + name); continue; }
-            if (!from.type().target(dialect).equals(to.type().target(dialect))) differences.add(name + ": expected " + from.type().sql(dialect) + ", target " + to.type().sql(dialect));
-            if (from.nullable() != to.nullable()) differences.add(name + ": nullability differs");
-            if (from.generated() != to.generated() || from.always() != to.always()) differences.add(name + ": identity/generated behavior differs");
-            if (!Objects.equals(from.defaultValue(), to.defaultValue())) differences.add(name + ": default value differs");
+            if (to == null) {
+                result.add(new ColumnDifference(name, "MISSING_TARGET_COLUMN", from.type().sql(dialect), null,
+                        "Add this column to the existing target table, or choose Create + load into a new table instead."));
+                continue;
+            }
+            if (!from.type().target(dialect).equals(to.type().target(dialect)))
+                result.add(new ColumnDifference(name, "TYPE_MISMATCH", from.type().sql(dialect), to.type().sql(dialect),
+                        "Alter the target column type to match, or remap this column explicitly before loading."));
+            if (from.nullable() != to.nullable())
+                result.add(new ColumnDifference(name, "NULLABILITY_MISMATCH", from.nullable() ? "NULL" : "NOT NULL", to.nullable() ? "NULL" : "NOT NULL",
+                        from.nullable() && !to.nullable() ? "Target requires NOT NULL; confirm no NULLs will be loaded, or relax the target constraint." : "Review whether the source's stricter constraint should also apply on the target."));
+            if (from.generated() != to.generated() || from.always() != to.always())
+                result.add(new ColumnDifference(name, "IDENTITY_MISMATCH", identityLabel(from), identityLabel(to),
+                        "Align identity/generated-column behavior on both sides before using DML-only loading."));
+            if (!Objects.equals(from.defaultValue(), to.defaultValue()))
+                result.add(new ColumnDifference(name, "DEFAULT_MISMATCH", String.valueOf(from.defaultValue()), String.valueOf(to.defaultValue()),
+                        "Defaults differ; only relevant for rows that omit this column explicitly."));
         }
-        for (String name : actual.keySet()) if (!expected.containsKey(name)) differences.add("Extra target column: " + name + "; explicit mapping required");
-        if (!keySignatures(source, dialect).equals(keySignatures(target, dialect))) differences.add("Primary, unique, foreign-key or index definitions differ");
+        for (String name : actual.keySet()) if (!expected.containsKey(name))
+            result.add(new ColumnDifference(name, "EXTRA_TARGET_COLUMN", null, actual.get(name).type().sql(dialect),
+                    "Map this column explicitly, or accept it will be left unset by inserted rows."));
+        if (!keySignatures(source, dialect).equals(keySignatures(target, dialect)))
+            result.add(new ColumnDifference(null, "KEY_OR_INDEX_MISMATCH", null, null,
+                    "Primary, unique, foreign-key or index definitions differ; review before using DML-only loading."));
+        return List.copyOf(result);
+    }
+
+    public static List<String> differences(Table source, Table target, Dialect dialect) {
+        List<String> differences = new ArrayList<>();
+        for (ColumnDifference d : structuredDifferences(source, target, dialect)) {
+            String prefix = d.column() == null ? "" : d.column() + ": ";
+            differences.add(switch (d.kind()) {
+                case "MISSING_TARGET_COLUMN" -> "Missing target column: " + d.column();
+                case "EXTRA_TARGET_COLUMN" -> "Extra target column: " + d.column() + "; explicit mapping required";
+                case "TYPE_MISMATCH" -> prefix + "expected " + d.expected() + ", target " + d.actual();
+                case "NULLABILITY_MISMATCH" -> prefix + "nullability differs";
+                case "IDENTITY_MISMATCH" -> prefix + "identity/generated behavior differs";
+                case "DEFAULT_MISMATCH" -> prefix + "default value differs";
+                case "KEY_OR_INDEX_MISMATCH" -> "Primary, unique, foreign-key or index definitions differ";
+                default -> prefix + d.kind();
+            });
+        }
         return List.copyOf(differences);
     }
+
+    private static String identityLabel(Column c) { return !c.generated() ? "not generated" : c.always() ? "GENERATED ALWAYS" : "GENERATED BY DEFAULT"; }
     private static Map<String, Column> columns(Table table, Dialect dialect) {
         Map<String, Column> result = new TreeMap<>(); for (Column c : table.columns()) result.put(c.name().in(dialect), c); return result;
     }

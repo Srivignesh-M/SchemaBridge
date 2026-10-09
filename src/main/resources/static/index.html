@@ -19,7 +19,6 @@
     <span class="eyebrow">DATABASE TOOLS / MIGRATION</span>
     <h1>Move your schema.<br><span>Keep control of your data.</span></h1>
     <p>Choose a workflow, review every proposed change, then export or run it.</p>
-    <img class="hero-banner" src="/images/schemabridge-banner.png" alt="SchemaBridge — Connect. Convert. Migrate.">
   </div>
 
   <nav class="steps" aria-label="Migration steps">
@@ -84,6 +83,7 @@
       <label class="inline"><input id="validateData" type="checkbox" checked> Verify transferred data before committing each table</label>
       <label class="inline"><input id="useCopy" type="checkbox"> Use PostgreSQL bulk loading (COPY) for database sources</label>
       <p class="muted">Completed tables are retained after a later failure. A higher row limit is not a guarantee for every table shape.</p></details></section>
+      <section class="card"><div class="section-title"><h2>Reusable configuration</h2></div><p class="muted">Save dialects, connection host/port/database/username, target schema and transfer settings as a JSON profile — never passwords. Re-enter passwords after importing.</p><div class="action-bar"><button type="button" id="exportSettings" class="secondary">Export settings</button><label class="upload">Import settings<input id="importSettings" type="file" accept="application/json"></label></div></section>
       <div class="action-bar"><button type="button" class="secondary" data-back="1">Back</button><span id="configStatus" role="status">Configure a source to begin.</span><button id="analyse" type="submit">Analyse and review <span>→</span></button></div>
     </section>
 
@@ -102,6 +102,7 @@
     <section id="reportSection" class="card" hidden>
       <div class="section-title"><div><span class="eyebrow">PREFLIGHT REPORT</span><h2 id="reportTitle">Review every table</h2></div><button id="matchAll" class="secondary" type="button">DML only for all matches</button></div>
       <div id="reportMessages"></div>
+      <p id="quotaSummary" class="muted"></p>
       <div id="statementSection" hidden><p id="statementSummary"></p><div class="table-scroll"><table><thead><tr><th>Statement</th><th>Type</th><th>Conversion status</th><th>Findings</th></tr></thead><tbody id="statementRows"></tbody></table></div></div>
       <div class="table-scroll" id="tableReport"><table><thead><tr><th>Target table</th><th>Target status</th><th>Rows</th><th>Findings</th><th>Action</th></tr></thead><tbody id="reportRows"></tbody></table></div>
       <details><summary id="previewTitle">Preview converted table definitions</summary><pre id="preview"></pre></details>
@@ -118,13 +119,30 @@
       <div id="downloadHelp" class="download-help" hidden><p id="downloadStatus" role="status" aria-live="polite"></p><a id="downloadLink" class="download-link" href="" hidden></a></div>
     </section>
     <section id="preparationSection" class="card" hidden><h2>Preparing data</h2><p id="preparationState" role="status" aria-live="polite"></p><div class="progress-panel" id="preparationProgress" role="group" aria-label="Preparation progress"><p class="progress-current"><span class="phase-badge" id="preparationPhase" aria-live="polite"></span><span id="preparationTable"></span></p><dl class="progress-metrics"><div><dt>Rows read</dt><dd id="preparationRead">0</dd></div><div><dt>Rows sent</dt><dd id="preparationSent">—</dd></div><div><dt>Rows committed</dt><dd id="preparationCommitted">—</dd></div><div><dt>Data processed</dt><dd id="preparationBytes">0 B</dd></div><div><dt>Elapsed</dt><dd id="preparationElapsed">0s</dd></div><div><dt>Throughput</dt><dd id="preparationRate">—</dd></div><div><dt>Estimated time remaining</dt><dd id="preparationEta">—</dd></div></dl></div><button id="cancelPreparation" class="secondary" type="button">Cancel preparation</button></section>
-    <section id="jobSection" class="card" hidden><div class="section-title"><h2>Execution report</h2><button id="jobDownload" class="secondary" type="button">Download final report</button></div><p id="jobState" role="status" aria-live="polite"></p><div class="progress-panel" id="jobProgressPanel" role="group" aria-label="Migration progress"><p class="progress-current"><span class="phase-badge" id="jobPhase" aria-live="polite"></span><span id="jobTable"></span></p><dl class="progress-metrics"><div><dt>Rows read</dt><dd id="jobRead">0</dd></div><div><dt>Rows sent</dt><dd id="jobSent">0</dd></div><div><dt>Rows committed</dt><dd id="jobCommitted">0</dd></div><div><dt>Data processed</dt><dd id="jobBytes">0 B</dd></div><div><dt>Elapsed</dt><dd id="jobElapsed">0s</dd></div><div><dt>Throughput</dt><dd id="jobRate">—</dd></div><div><dt>Estimated time remaining</dt><dd id="jobEta">—</dd></div></dl></div><button id="cancelJob" class="secondary" type="button">Cancel migration</button><button id="resumeJob" class="secondary" type="button" hidden>Resume with current target connection</button><div class="table-scroll"><table><thead><tr><th>Table</th><th>Action</th><th>Status</th><th>Committed rows</th><th>Details</th></tr></thead><tbody id="jobRows"></tbody></table></div></section>
+    <section id="jobSection" class="card" hidden><div class="section-title"><h2>Execution report</h2><button id="jobDownload" class="secondary" type="button">Download final report</button></div><p id="jobState" role="status" aria-live="polite"></p><div class="progress-panel" id="jobProgressPanel" role="group" aria-label="Migration progress"><p class="progress-current"><span class="phase-badge" id="jobPhase" aria-live="polite"></span><span id="jobTable"></span></p><dl class="progress-metrics"><div><dt>Rows read</dt><dd id="jobRead">0</dd></div><div><dt>Rows sent</dt><dd id="jobSent">0</dd></div><div><dt>Rows committed</dt><dd id="jobCommitted">0</dd></div><div><dt>Data processed</dt><dd id="jobBytes">0 B</dd></div><div><dt>Elapsed</dt><dd id="jobElapsed">0s</dd></div><div><dt>Throughput</dt><dd id="jobRate">—</dd></div><div><dt>Estimated time remaining</dt><dd id="jobEta">—</dd></div></dl></div><button id="cancelJob" class="secondary" type="button">Cancel migration</button><button id="resumeJob" class="secondary" type="button" hidden>Resume with current target connection</button><div class="table-scroll"><table><thead><tr><th>Table</th><th>Action</th><th>Status</th><th>Committed rows</th><th>Validation &amp; details</th></tr></thead><tbody id="jobRows"></tbody></table></div></section>
+    <section class="card" aria-labelledby="storageTitle"><div class="section-title"><h2 id="storageTitle">Local storage</h2><button id="refreshStorage" class="secondary" type="button">Refresh storage</button></div><p class="muted">Staged data and reports for all saved plans, plus free disk space on this work directory's drive. A preview only — nothing is deleted here.</p><dl class="progress-metrics" id="storageMetrics"></dl><p id="storageOrphans" class="muted" hidden></p></section>
     <section class="card" aria-labelledby="historyTitle"><div class="section-title"><h2 id="historyTitle">Saved migration history</h2><button id="refreshHistory" class="secondary" type="button">Refresh history</button></div><p class="muted">History loads automatically. Passwords are not saved. Interrupted jobs with an uncertain commit require target reconciliation.</p><p id="jobHistoryStatus" class="history-status" role="status" aria-live="polite"></p><div id="jobHistory" class="history-list" role="list" aria-label="Saved migrations"></div></section>
+    <section id="revertSection" class="card" hidden aria-labelledby="revertTitle">
+      <h2 id="revertTitle">Revert transfer</h2>
+      <p>Remove rows inserted by the selected migration and drop tables it created. Existing tables and unrelated rows are kept. Identity and sequence counters are not reset.</p>
+      <p id="revertState" role="status" aria-live="polite"></p>
+      <button id="reviewRevert" class="secondary" type="button">Review revert with current target connection</button>
+      <button id="cancelRevert" class="secondary" type="button" hidden>Cancel revert</button>
+      <div id="revertReview" hidden>
+        <p id="revertTarget"></p><p id="revertExpiry" class="muted"></p>
+        <ul id="revertTables"></ul>
+        <p>Stop other applications from writing to these tables until revert finishes. Table drops cannot always be rolled back. Revert stops if its checks find changed data or unsupported dependencies.</p>
+        <label class="revert-confirmation"><input id="acknowledgeRevert" type="checkbox"> I have stopped other writes and want to remove the rows and tables listed above.</label>
+        <button id="confirmRevert" class="danger" type="button" disabled>Confirm revert</button>
+        <button id="dismissRevert" class="secondary" type="button">Keep this migration</button>
+      </div>
+      <ul id="revertResults"></ul>
+    </section>
     <div class="wizard-actions"><button type="button" class="secondary" data-back="3">Back to review</button><button type="button" id="startOver" class="secondary">Start another workflow</button></div>
   </section>
 
   <div id="error" role="alert" hidden></div>
-  <footer>SchemaBridge · Local single-user application · <span id="buildVersion" aria-label="Build version">Loading version…</span> · Credentials are kept out of reports</footer>
+  <footer><img class="footer-banner" src="/images/schemabridge-banner.png" alt="SchemaBridge — Connect. Convert. Migrate."><span>SchemaBridge · Local single-user application · <span id="buildVersion" aria-label="Build version">Loading version…</span> · Credentials are kept out of reports</span></footer>
 </main>
 </body>
 </html>

@@ -45,6 +45,7 @@ internal sealed class MigrationWindow : Form
     {
         this.home = home; this.profile = profile; this.parent = parent; this.smokeDirectory = smokeDirectory;
         Text = "Fingress SQL Migration"; Size = new Size(1280, 900); MinimumSize = new Size(850, 600);
+        if (smokeDirectory != null) Size = new Size(850, 600);
         StartPosition = FormStartPosition.CenterScreen;
         view.Dock = DockStyle.Fill; Controls.Add(view);
         status.Text = "Starting application..."; status.Dock = DockStyle.Bottom; status.Height = 26;
@@ -166,6 +167,35 @@ internal sealed class MigrationWindow : Form
         try
         {
             Directory.CreateDirectory(smokeDirectory);
+            var desktopLayout = await view.CoreWebView2.ExecuteScriptAsync(@"(() => {
+              const heading=document.querySelector('[data-step-page=""1""] .card h2');
+              const banner=document.querySelector('.footer-banner');
+              if (!heading || heading.getBoundingClientRect().top >= innerHeight) throw Error('Workflow choices are below the initial desktop view');
+              if (!banner || !document.querySelector('footer').contains(banner)) throw Error('Brand banner should stay out of the opening workflow view');
+              const dialog=document.getElementById('tablePicker'), list=document.getElementById('tablePickerList'), mappings=document.getElementById('columnOptions');
+              list.replaceChildren();mappings.replaceChildren();
+              for(let i=0;i<80;i++){const row=document.createElement('label');row.className='table-picker-option';row.textContent='Table '+i;list.append(row);}
+              for(let i=0;i<40;i++){const row=document.createElement('details');row.open=true;const summary=document.createElement('summary');summary.textContent='Mapping '+i;row.append(summary);const detail=document.createElement('p');detail.textContent='Column mapping content '+i;mappings.append(row);row.append(detail);}
+              dialog.showModal();
+              const tablePane=document.querySelector('.picker-list'), mappingPane=document.querySelector('.picker-mappings');
+              tablePane.scrollTop=500;mappingPane.scrollTop=500;
+              const scrolls=tablePane.scrollTop>0&&mappingPane.scrollTop>0&&tablePane.clientHeight>0&&mappingPane.clientHeight>0;
+              dialog.close();return scrolls;
+            })()");
+            if (desktopLayout != "true") throw new Exception("Desktop workflow visibility or table-picker scrolling check failed: " + desktopLayout);
+            var originalSize = Size; var originalMinimum = MinimumSize;
+            MinimumSize = new Size(320, 400); Size = new Size(390, 700);
+            await Task.Delay(250);
+            var mobileLayout = await view.CoreWebView2.ExecuteScriptAsync(@"(() => {
+              if (innerWidth > 700) return false;
+              const dialog=document.getElementById('tablePicker');dialog.showModal();
+              const grid=document.querySelector('.table-picker-grid'), list=document.querySelector('.picker-list'), mappings=document.querySelector('.picker-mappings');
+              list.scrollTop=300;mappings.scrollTop=300;
+              const result=getComputedStyle(grid).gridTemplateColumns.split(' ').length===1&&list.scrollTop>0&&mappings.scrollTop>0&&dialog.getBoundingClientRect().height<=innerHeight;
+              dialog.close();return result;
+            })()");
+            MinimumSize = originalMinimum; Size = originalSize;
+            if (mobileLayout != "true") throw new Exception("Mobile table-picker scrolling check failed: " + mobileLayout);
             var result = await view.CoreWebView2.ExecuteScriptAsync(@"(() => {
               if (!document.getElementById('analyse') || document.getElementById('askAi')) throw Error('Unexpected interface');
               if (!document.getElementById('folder').hasAttribute('webkitdirectory')) throw Error('Folder upload missing');
@@ -199,7 +229,7 @@ internal sealed class MigrationWindow : Form
                 throw new Exception("Embedded ZIP download failed.");
             using (var screenshot = File.Create(Path.Combine(smokeDirectory, "window.png")))
                 await view.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, screenshot);
-            File.WriteAllText(Path.Combine(smokeDirectory, "passed.txt"), "Embedded interface, folder input, conversion, blob ZIP download and shutdown passed.");
+            File.WriteAllText(Path.Combine(smokeDirectory, "passed.txt"), "Embedded interface, initial workflow visibility, desktop/mobile table-picker scrolling, folder input, conversion, blob ZIP download and shutdown passed.");
             allowClose = true; Close();
         }
         catch (Exception error) { Fail(error.ToString()); }

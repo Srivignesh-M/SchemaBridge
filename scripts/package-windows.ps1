@@ -21,8 +21,10 @@ try {
         & mvn -B -ntp verify
         if ($LASTEXITCODE -ne 0) { throw 'Maven verification failed.' }
     }
-    $jar = Join-Path $project 'target/fg-sql-migration-1.0.0-SNAPSHOT.jar'
-    if (!(Test-Path -LiteralPath $jar)) { throw "Missing application JAR: $jar" }
+    $jarCandidates = @(Get-ChildItem -LiteralPath (Join-Path $project 'target') -Filter 'fg-sql-migration-*.jar' -ErrorAction SilentlyContinue)
+    if ($jarCandidates.Count -eq 0) { throw "Missing application JAR in target/. Run mvn package first." }
+    if ($jarCandidates.Count -gt 1) { throw "Multiple candidate JARs found in target/: $($jarCandidates.Name -join ', '). Clean target/ and rebuild." }
+    $jar = $jarCandidates[0].FullName
     # A unique staging directory contains only the deliverable JAR, never local credentials or reports.
     $stage = Join-Path $project ('target/packaging-' + [guid]::NewGuid().ToString('N'))
     $inputDir = Join-Path $stage 'input'

@@ -29,7 +29,7 @@ public class MigrationController {
     @PostMapping(value = "/plans", consumes = MediaType.APPLICATION_JSON_VALUE) public PlanView plan(@RequestBody PlanRequest request) throws Exception { return service.create(request); }
     @GetMapping("/plans/{id}") public PlanView plan(@PathVariable String id) { return service.view(id); }
     @GetMapping(value = "/plans/{id}/preview", produces = MediaType.TEXT_PLAIN_VALUE) public String preview(@PathVariable String id) throws Exception { return service.preview(id); }
-    @DeleteMapping("/plans/{id}") public void delete(@PathVariable String id) throws Exception { service.delete(id); }
+    @DeleteMapping("/plans/{id}") public void delete(@PathVariable String id, @RequestParam(defaultValue = "false") boolean acknowledgeUncertain) throws Exception { service.delete(id, acknowledgeUncertain); }
     @PostMapping(value = "/plans/{id}/download", consumes = MediaType.APPLICATION_JSON_VALUE)
     public void download(@PathVariable String id, @RequestBody Map<String, Action> actions, HttpServletResponse response) throws Exception {
         String name = service.downloadName(id);
@@ -38,8 +38,11 @@ public class MigrationController {
     @PostMapping(value = "/plans/{id}/execute", consumes = MediaType.APPLICATION_JSON_VALUE) public JobView execute(@PathVariable String id, @RequestBody ExecuteRequest request) { return service.execute(id, request); }
     @GetMapping("/jobs/{id}") public JobView job(@PathVariable String id) { return service.job(id); }
     @GetMapping("/jobs") public List<JobView> history(){return service.history();}
+    @GetMapping("/storage") public StorageView storage()throws Exception{return service.storage();}
     @PostMapping("/jobs/{id}/cancel") public JobView cancel(@PathVariable String id){return service.cancel(id);}
     @PostMapping("/jobs/{id}/resume") public JobView resume(@PathVariable String id,@RequestBody ConnectionSpec target){return service.resume(id,target);}
+    @PostMapping("/jobs/{id}/revert-preview") public RevertPreview previewRevert(@PathVariable String id,@RequestBody ConnectionSpec target)throws Exception{return service.previewRevert(id,target);}
+    @PostMapping("/jobs/{id}/revert") public JobView revert(@PathVariable String id,@RequestBody RevertRequest request){return service.revert(id,request);}
     @PostMapping("/plans/{id}/download-ticket") public Map<String,String> ticket(@PathVariable String id,@RequestBody Map<String,Action> actions){
         service.validateDownload(id,actions);long now=System.currentTimeMillis();tickets.entrySet().removeIf(e->e.getValue().expires()<now);
         if(tickets.size()>=64)throw new IllegalArgumentException("Too many pending downloads");String token=UUID.randomUUID().toString();

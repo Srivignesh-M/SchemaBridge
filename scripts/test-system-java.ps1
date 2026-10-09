@@ -18,7 +18,9 @@ if ($ApplicationDirectory) {
     $desktop = Join-Path $app 'desktop'
     New-Item -ItemType Directory -Path $desktop | Out-Null
     Copy-Item -LiteralPath (Join-Path $ApplicationDirectory 'Fingress SQL Migration.exe') -Destination $package
-    Copy-Item -LiteralPath (Join-Path $ApplicationDirectory 'app/fg-sql-migration-1.0.0-SNAPSHOT.jar') -Destination $app
+    $jarCandidates = @(Get-ChildItem -LiteralPath (Join-Path $ApplicationDirectory 'app') -Filter 'fg-sql-migration-*.jar' -ErrorAction SilentlyContinue)
+    if ($jarCandidates.Count -ne 1) { throw "Expected exactly one fg-sql-migration-*.jar under $ApplicationDirectory/app, found $($jarCandidates.Count)." }
+    Copy-Item -LiteralPath $jarCandidates[0].FullName -Destination $app
     & $compiler /nologo /target:winexe /main:BackendProbeHost "/out:$(Join-Path $desktop 'FingressDesktop.exe')" /reference:System.Windows.Forms.dll $source $tests
     if ($LASTEXITCODE -ne 0) { throw 'Backend probe compilation failed.' }
     $previousData = $env:LOCALAPPDATA

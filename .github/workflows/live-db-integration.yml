@@ -1,0 +1,116 @@
+name: Live database integration (Oracle + PostgreSQL, trusted)
+
+# Deliberately not a pull_request trigger: this job needs real Oracle/PostgreSQL
+# credentials, and GitHub never exposes repository secrets to pull_request-triggered
+# runs from forks. Keeping this manual/scheduled-only means it only ever runs with
+# this repository's own secrets, never a contributor's.
+on:
+  workflow_dispatch:
+    inputs:
+      runBenchmarks:
+        description: 'Also run the opt-in 100K cross-database benchmarks (slower; records fixture/driver/build identity in target/benchmarks/*.json)'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 3 * * *'
+
+jobs:
+  check-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        env:
+          HAVE_ORACLE: ${{ secrets.LIVE_DB_ORACLE_PASSWORD != '' }}
+          HAVE_PG: ${{ secrets.LIVE_DB_PG_PASSWORD != '' }}
+        run: |
+          if [ "$HAVE_ORACLE" = "true" ] && [ "$HAVE_PG" = "true" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping live-database integration: LIVE_DB_ORACLE_PASSWORD and/or LIVE_DB_PG_PASSWORD repository secrets are not configured. See LIVE-DATABASE-CHECKS.md."
+          fi
+
+  live-db-suite:
+    needs: check-secrets
+    if: needs.check-secrets.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.LIVE_DB_PG_PASSWORD }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      oracle:
+        image: gvenzl/oracle-free:slim-faststart
+        env:
+          ORACLE_PASSWORD: ${{ secrets.LIVE_DB_ORACLE_PASSWORD }}
+        ports:
+          - 1521:1521
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # gvenzl/oracle-free ships a HEALTHCHECK, but GitHub's service container
+      # health-wait does not run it the same way local Docker does on some runner
+      # images; wait explicitly rather than racing the first test against a DB
+      # that is still finishing its first-boot setup.
+      - name: Wait for Oracle to report ready
+        run: |
+          for i in $(seq 1 60); do
+            if docker logs "$(docker ps -q --filter ancestor=gvenzl/oracle-free:slim-faststart)" 2>&1 | grep -q "DATABASE IS READY TO USE"; then
+              echo "Oracle ready"; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Oracle did not report ready within 5 minutes"; exit 1
+
+      - name: Full regression suite against live Oracle + PostgreSQL
+        env:
+          MIGRATION_ORACLE_PASSWORD: ${{ secrets.LIVE_DB_ORACLE_PASSWORD }}
+          MIGRATION_ORACLE_SYS_PASSWORD: ${{ secrets.LIVE_DB_ORACLE_PASSWORD }}
+          MIGRATION_PG_USERNAME: postgres
+          MIGRATION_PG_PASSWORD: ${{ secrets.LIVE_DB_PG_PASSWORD }}
+        run: >-
+          mvn -B -ntp -f pom.xml test
+          -Dmigration.oracle.port=1521 -Dmigration.pg.port=5432 -DargLine=-Xmx1g
+
+      - name: Opt-in 100K cross-database benchmarks
+        if: ${{ inputs.runBenchmarks }}
+        env:
+          MIGRATION_ORACLE_PASSWORD: ${{ secrets.LIVE_DB_ORACLE_PASSWORD }}
+          MIGRATION_ORACLE_SYS_PASSWORD: ${{ secrets.LIVE_DB_ORACLE_PASSWORD }}
+          MIGRATION_PG_USERNAME: postgres
+          MIGRATION_PG_PASSWORD: ${{ secrets.LIVE_DB_PG_PASSWORD }}
+        run: >-
+          mvn -B -ntp -f pom.xml test
+          "-Dtest=OracleTransferTest,PostgresTransferTest"
+          -Dmigration.oracle.port=1521 -Dmigration.pg.port=5432
+          -Dmigration.oracle.benchmarkRows=100000 -Dmigration.benchmark=true
+          -Dmigration.cross.benchmarkRows=100000 -DargLine=-Xmx1g
+        continue-on-error: true
+
+      - name: Upload surefire reports and benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-db-evidence-${{ github.run_id }}
+          path: |
+            target/surefire-reports/**
+            target/benchmarks/**
+          if-no-files-found: warn
+          retention-days: 90

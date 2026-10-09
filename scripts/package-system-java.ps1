@@ -15,7 +15,10 @@ try {
     $package = Join-Path $stage 'Fingress SQL Migration'
     $app = Join-Path $package 'app'
     New-Item -ItemType Directory -Path $app | Out-Null
-    Copy-Item -LiteralPath 'target/fg-sql-migration-1.0.0-SNAPSHOT.jar' -Destination $app
+    $jarCandidates = @(Get-ChildItem -LiteralPath (Join-Path $project 'target') -Filter 'fg-sql-migration-*.jar' -ErrorAction SilentlyContinue)
+    if ($jarCandidates.Count -eq 0) { throw "Missing application JAR in target/. Run mvn package first." }
+    if ($jarCandidates.Count -gt 1) { throw "Multiple candidate JARs found in target/: $($jarCandidates.Name -join ', '). Clean target/ and rebuild." }
+    Copy-Item -LiteralPath $jarCandidates[0].FullName -Destination $app
     & (Join-Path $PSScriptRoot 'build-desktop.ps1') -OutputDirectory (Join-Path $app 'desktop') -WebView2Sdk $WebView2Sdk
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
     $icon = Join-Path $project 'src/main/resources/static/images/schemabridge.ico'

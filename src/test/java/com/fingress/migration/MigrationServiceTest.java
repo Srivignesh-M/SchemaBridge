@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.sql.*;
 import java.util.*;
 import java.io.*;
@@ -36,6 +37,29 @@ class MigrationServiceTest {
         JobView job = await(service.execute(plan.id(), new ExecuteRequest(target, Map.of("customers", Action.CREATE_AND_LOAD))));
         assertEquals("SUCCEEDED", job.state(), job.message()); assertEquals(1, count("customers")); assertEquals(1, job.tables().getFirst().rows());
     }
+    @Test void structuredValidationReportDistinguishesMethodScopeAndSkipped() throws Exception {
+        PlanView plan = plan(DDL + "CREATE TABLE orders (id NUMBER(8));" + "INSERT INTO customers VALUES (1,'Anita');", true);
+        JobView job = await(service.execute(plan.id(), new ExecuteRequest(target, Map.of("customers", Action.CREATE_AND_LOAD, "orders", Action.SKIP))));
+        assertEquals("SUCCEEDED", job.state(), job.message());
+        // This test class only exercises SQL-text input (no source database connection), which is
+        // never "typed" staged data, so this is the ROW_COUNT path. See TransferFeaturesTest for the
+        // FINGERPRINT path, which requires a real database-to-database (typed) transfer.
+        TableResult customers = job.tables().stream().filter(t -> t.table().equals("customers")).findFirst().orElseThrow();
+        assertEquals("ROW_COUNT", customers.validation().method()); assertEquals("PASSED", customers.validation().outcome());
+        assertEquals(1, customers.validation().rowsChecked()); assertTrue(customers.validation().durationSeconds() >= 0);
+        assertNull(customers.validation().skippedReason());
+        TableResult orders = job.tables().stream().filter(t -> t.table().equals("orders")).findFirst().orElseThrow();
+        assertEquals("SKIPPED", orders.validation().outcome()); assertEquals("NONE", orders.validation().method());
+        assertFalse(orders.validation().skippedReason().isBlank());
+    }
+    @Test void validationDisabledIsReportedAsNoneNotSilentlyOmitted() throws Exception {
+        PlanView plan = service.create(new PlanRequest(Dialect.ORACLE, Dialect.POSTGRESQL, "public", DDL + "INSERT INTO customers VALUES (1,'Anita');",
+                null, null, List.of(), true, target, new MigrationOptions(null,null,null,null,null,null,null,null,false,null), Map.of(), false));
+        JobView job = await(service.execute(plan.id(), new ExecuteRequest(target, Map.of("customers", Action.CREATE_AND_LOAD))));
+        assertEquals("SUCCEEDED", job.state(), job.message());
+        ValidationReport validation = job.tables().getFirst().validation();
+        assertEquals("NONE", validation.method()); assertEquals("Validation disabled by user.", validation.skippedReason());
+    }
     @Test void existingMatchingTableOffersDmlOnlyAndPreservesExistingRows() throws Exception {
         sql("CREATE TABLE customers (name VARCHAR(100) NOT NULL, id NUMERIC(10,0) PRIMARY KEY)"); sql("INSERT INTO customers VALUES ('Existing',7)");
         PlanView plan = plan(DDL + "INSERT INTO customers (id,name) VALUES (1,'New');", true);
@@ -49,6 +73,23 @@ class MigrationServiceTest {
         PlanView plan = plan(DDL + "CREATE TABLE orders (id NUMBER(8));", true);
         assertEquals(2, plan.tables().size()); assertEquals(Status.MISMATCH, plan.tables().getFirst().status()); assertEquals(Status.NEW, plan.tables().get(1).status());
         assertThrows(IllegalArgumentException.class, () -> service.execute(plan.id(), new ExecuteRequest(target, Map.of("customers", Action.DML_ONLY, "orders", Action.CREATE_AND_LOAD))));
+    }
+    @Test void mismatchProducesStructuredColumnComparisonWithCorrections() throws Exception {
+        sql("CREATE TABLE customers (id NUMERIC(10,0) PRIMARY KEY, name VARCHAR(20) NOT NULL)");
+        PlanView plan = plan(DDL, true);
+        TableReport customers = plan.tables().getFirst();
+        assertEquals(Status.MISMATCH, customers.status());
+        ColumnDifference nameMismatch = customers.columnComparison().stream().filter(d -> "name".equals(d.column())).findFirst().orElseThrow();
+        assertEquals("TYPE_MISMATCH", nameMismatch.kind());
+        assertTrue(nameMismatch.expected().contains("100")); assertTrue(nameMismatch.actual().contains("20"));
+        assertFalse(nameMismatch.correction().isBlank());
+    }
+    @Test void foreignKeyDependencySummaryListsReferencedTables() throws Exception {
+        PlanView plan = plan("CREATE TABLE customers (id NUMBER(10,0) PRIMARY KEY); CREATE TABLE orders (id NUMBER(10,0) PRIMARY KEY, customer_id NUMBER(10,0) REFERENCES customers(id));", false);
+        TableReport orders = plan.tables().stream().filter(t -> t.table().equals("orders")).findFirst().orElseThrow();
+        assertEquals(List.of("customers"), orders.dependsOn());
+        TableReport customers = plan.tables().stream().filter(t -> t.table().equals("customers")).findFirst().orElseThrow();
+        assertEquals(List.of(), customers.dependsOn());
     }
     @Test void detectsTargetSchemaDriftBeforeWriting() throws Exception {
         sql("CREATE TABLE customers (id NUMERIC(10,0) PRIMARY KEY, name VARCHAR(100) NOT NULL)");
@@ -147,5 +188,17 @@ class MigrationServiceTest {
             }
         }
         return output;
+    }
+    @Test void storageReportsStagedBytesAndPreviewsReclaimableExpiredPlans() throws Exception {
+        PlanView fresh = plan(DDL + "INSERT INTO customers VALUES (1,'Anita');", true);
+        StorageView before = service.storage();
+        PlanStorage freshEntry = before.plans().stream().filter(p -> p.id().equals(fresh.id())).findFirst().orElseThrow();
+        assertTrue(freshEntry.bytes() > 0); assertFalse(freshEntry.reclaimable()); assertEquals("NOT_RUN", freshEntry.state());
+        assertTrue(before.stagedBytes() >= freshEntry.bytes()); assertTrue(before.freeDiskBytes() > 0);
+        assertEquals(0, before.orphanedDirectories().size());
+        // A plan with a real (unexpired) directory on disk but no matching tracked entry is an orphan.
+        Files.createDirectories(directory.resolve("orphan-"+UUID.randomUUID()));
+        StorageView withOrphan = service.storage();
+        assertEquals(1, withOrphan.orphanedDirectories().size());
     }
 }

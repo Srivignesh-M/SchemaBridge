@@ -88,9 +88,13 @@ internal static class SystemJavaLauncher
             }
             if (check) { Console.WriteLine(java); return 0; }
             string root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
-            string jar = Path.Combine(root, "app", "fg-sql-migration-1.0.0-SNAPSHOT.jar");
-            if (!File.Exists(jar) || !File.Exists(Path.Combine(root, "app", "desktop", "FingressDesktop.exe")))
+            string appDir = Path.Combine(root, "app");
+            string[] jarCandidates = Directory.Exists(appDir) ? Directory.GetFiles(appDir, "fg-sql-migration-*.jar") : new string[0];
+            if (jarCandidates.Length == 0 || !File.Exists(Path.Combine(appDir, "desktop", "FingressDesktop.exe")))
                 throw new FileNotFoundException("Application files are missing. Extract the complete ZIP and keep the app folder beside this executable.");
+            if (jarCandidates.Length > 1)
+                throw new FileNotFoundException("Multiple application JARs found in the app folder; keep only one fg-sql-migration-*.jar file.");
+            string jar = jarCandidates[0];
             var arguments = new List<string> { "-Dmigration.desktop-home=" + root, "-jar", jar, "--desktop" };
             foreach (string arg in args)
             {

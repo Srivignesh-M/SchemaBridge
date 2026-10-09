@@ -34,10 +34,25 @@ public class MigrationService implements AutoCloseable {
         MigrationOptions options;
         Map<String,Action> actions = Map.of();
         final Set<String> created = new HashSet<>(), committed = new HashSet<>(), finalized = new HashSet<>();
-        final Map<String,String> validations = new HashMap<>();
+        final Map<String,ValidationReport> validations = new HashMap<>();
+        final Map<String,DataFingerprint> createdFingerprints = new HashMap<>();
+        final Map<String,String> targetObjectIds = new HashMap<>();
+        volatile Revert revert;
         volatile boolean uncertain; int attempt=1;
-        JobView view() { return new JobView(id,state,List.copyOf(tables),message,planId,progress.view(),!uncertain&&Set.of("FAILED","CANCELLED").contains(state),options); }
+        JobView view() { return new JobView(id,state,List.copyOf(tables),message,planId,progress.view(),revert==null&&!uncertain&&Set.of("FAILED","CANCELLED").contains(state),options,revert==null?null:revert.view()); }
     }
+    static final class Revert {
+        volatile String state="QUEUED",message="Waiting to revert";
+        volatile boolean running;
+        volatile boolean rowsRemoved;
+        final Set<String> dropped=ConcurrentHashMap.newKeySet();
+        List<RevertTable> tables=List.of();
+        final TransferProgress progress=new TransferProgress();
+        RevertView view(){return new RevertView(running&&!Set.of("QUEUED","RUNNING").contains(state)?"RUNNING":state,message,tables.stream().map(t->new RevertTable(t.table(),t.action(),t.rows(),
+                dropped.contains(t.table())?"DROPPED":rowsRemoved?"ROWS_REMOVED":state.equals("RECOVERY_REQUIRED")?"UNCERTAIN":"PENDING")).toList(),progress.view());}
+    }
+    private record RevertTicket(String jobId,String targetIdentity,long expires) {}
+    private final Map<String,RevertTicket> revertTickets=new ConcurrentHashMap<>();
     static final class Preparation {
         final String id=UUID.randomUUID().toString(); final TransferProgress progress=new TransferProgress();
         volatile String state="QUEUED",message="Waiting"; volatile PlanView result;
@@ -110,11 +125,15 @@ public class MigrationService implements AutoCloseable {
                             if (actual == null) reports.add(report(table, request.targetDialect(), Status.NEW, List.of(), plan, List.of(Action.CREATE_AND_LOAD, Action.SKIP)));
                             else {
                                 plan.targetTables.put(name, actual);
+                                List<ColumnDifference> columnComparison = new ArrayList<>(Compatibility.structuredDifferences(table, actual, request.targetDialect()));
                                 List<String> diff = new ArrayList<>(Compatibility.differences(table, actual, request.targetDialect()));
-                                if (request.targetDialect() == Dialect.ORACLE && table.columns().stream().anyMatch(Column::generated) && plan.rows.getOrDefault(name, 0L) > 0)
+                                if (request.targetDialect() == Dialect.ORACLE && table.columns().stream().anyMatch(Column::generated) && plan.rows.getOrDefault(name, 0L) > 0) {
                                     diff.add("Oracle identity maintenance requires DDL; DML-only mode cannot load explicit identity values");
+                                    columnComparison.add(new ColumnDifference(null, "ORACLE_IDENTITY_DML_BLOCKED", null, null,
+                                            "Oracle identity maintenance requires DDL; choose Create + load into a new table, or remove identity columns from the DML-only selection."));
+                                }
                                 reports.add(report(table, request.targetDialect(), diff.isEmpty() ? Status.MATCH : Status.MISMATCH, diff, plan,
-                                        diff.isEmpty() ? List.of(Action.DML_ONLY, Action.SKIP) : List.of(Action.SKIP)));
+                                        diff.isEmpty() ? List.of(Action.DML_ONLY, Action.SKIP) : List.of(Action.SKIP), columnComparison));
                             }
                         } catch (IllegalArgumentException e) {
                             reports.add(report(table, request.targetDialect(), Status.MISMATCH, List.of(e.getMessage()), plan, List.of(Action.SKIP)));
@@ -202,8 +221,12 @@ public class MigrationService implements AutoCloseable {
         }
     }
     private TableReport report(Table table, Dialect dialect, Status status, List<String> diff, Plan plan, List<Action> actions) {
+        return report(table, dialect, status, diff, plan, actions, List.of());
+    }
+    private TableReport report(Table table, Dialect dialect, Status status, List<String> diff, Plan plan, List<Action> actions, List<ColumnDifference> columnComparison) {
         String name=table.name().in(dialect);
-        return new TableReport(name, status, List.copyOf(diff), table.warnings(), plan.rows.getOrDefault(name, 0L), actions, plan.estimatedRows.get(name));
+        List<String> dependsOn = table.keys().stream().filter(k -> k.kind().equals("FOREIGN KEY")).map(k -> k.reference().in(dialect)).distinct().toList();
+        return new TableReport(name, status, List.copyOf(diff), table.warnings(), plan.rows.getOrDefault(name, 0L), actions, plan.estimatedRows.get(name), columnComparison, dependsOn);
     }
     private void dependencies(Plan plan, PlanRequest request, Connection connection, List<String> issues) throws SQLException {
         for (Table table : plan.tables) for (Key key : table.keys()) if (key.kind().equals("FOREIGN KEY")) {
@@ -382,6 +405,9 @@ public class MigrationService implements AutoCloseable {
                     Table previous=plan.targetTables.get(name);
                     if(job.created.contains(name))previous=job.finalized.contains(name)?table:new Table(table.name(),table.columns(),table.keys().stream().filter(k->!Set.of("FOREIGN KEY","INDEX").contains(k.kind())).toList(),table.warnings());
                     if((current==null)!=(previous==null)||current!=null&&!Compatibility.differences(previous,current,plan.view.targetDialect()).isEmpty())throw new IllegalArgumentException("Target structure changed; re-analyse or reconcile before resuming");
+                    if(current!=null){String objectId=db.objectIdentity(connection,plan.view.targetSchema(),name,plan.view.targetDialect());
+                        if(job.targetObjectIds.containsKey(name)&&!job.targetObjectIds.get(name).equals(objectId))throw new IllegalArgumentException("Target table was replaced; reconcile before resuming");
+                        job.targetObjectIds.put(name,objectId);}
                 }
                 connection.setAutoCommit(false);
                 try(Statement statement=connection.createStatement()) {
@@ -392,13 +418,16 @@ public class MigrationService implements AutoCloseable {
                             if(actions.get(active)==Action.CREATE_AND_LOAD&&!job.created.contains(active)){
                                 job.progress.phase="CREATING";checkpoint(plan,job);risky=true;
                                 job.progress.statement=statement;statement.execute(SqlWriter.create(table,plan.view.targetSchema(),plan.view.targetDialect()));connection.commit();
-                                job.created.add(active);checkpoint(plan,job);risky=false;
+                                job.created.add(active);job.targetObjectIds.put(active,db.objectIdentity(connection,plan.view.targetSchema(),active,plan.view.targetDialect()));checkpoint(plan,job);risky=false;
                             }
                         }
                         for(Table table:ordered(plan,actions)){
                             active=table.name().in(plan.view.targetDialect());if(actions.get(active)==Action.SKIP||job.committed.contains(active))continue;
                             job.progress.check();job.progress.table=active;job.progress.phase="LOADING";job.message="Loading "+active;checkpoint(plan,job);
-                            String validation=loadTable(connection,plan,table,job);
+                            ValidationReport validation=loadTable(connection,plan,table,job);
+                            // New SQL-input tables have no typed source rows. Keep a compact receipt
+                            // of their actual values so a later revert can verify the entire table.
+                            if(job.created.contains(active))job.createdFingerprints.put(active,DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.options,job.progress));
                             job.progress.check();risky=true;connection.commit();
                             job.committed.add(active);job.validations.put(active,validation);job.progress.rowsCommitted+=plan.rows.getOrDefault(active,0L);
                             checkpoint(plan,job);risky=false;
@@ -418,21 +447,32 @@ public class MigrationService implements AutoCloseable {
         }catch(Exception failure){
             job.uncertain=risky;
             outcome=risky?"RECOVERY_REQUIRED":job.progress.cancel||failure instanceof CancellationException?"CANCELLED":"FAILED";
-            job.message=risky?"A DDL or commit outcome is uncertain. Automatic replay is disabled; inspect the target and reconcile.":failure instanceof SQLException sql?"Database operation failed (SQLState "+sql.getSQLState()+", code "+sql.getErrorCode()+"). Current table rolled back; earlier commits remain.":failure instanceof IllegalArgumentException?failure.getMessage():outcome.equals("CANCELLED")?"Cancelled. Current transaction rolled back; earlier committed tables are retained.":"Operation failed. Check local disk, artifacts and database access. Earlier committed tables remain.";
+            job.message=risky?"A DDL or commit outcome is uncertain. Automatic replay is disabled; inspect the target and reconcile.":failure instanceof SQLException sql?DatabaseErrorGuidance.describe(sql)+" Current table rolled back; earlier commits remain.":failure instanceof IllegalArgumentException?failure.getMessage():outcome.equals("CANCELLED")?"Cancelled. Current transaction rolled back; earlier committed tables are retained.":"Operation failed. Check local disk, artifacts and database access. Earlier committed tables remain.";
         }finally{
           synchronized(this){
             job.progress.statement=null;job.progress.finished=System.currentTimeMillis();job.state=outcome;job.progress.phase=outcome;job.tables.clear();
             for(Table table:plan.tables){String name=table.name().in(plan.view.targetDialect());Action action=actions.get(name);
                 String status=action==Action.SKIP?"SKIPPED":job.finalized.contains(name)?"SUCCEEDED":job.committed.contains(name)||job.created.contains(name)?"PARTIAL_OR_FAILED":"NOT_RUN";
+                ValidationReport report=job.validations.get(name);
+                if(report==null&&action==Action.SKIP)report=new ValidationReport("NONE",0,0,"SKIPPED","Table skipped by the selected action.");
+                else if(report==null&&status.equals("NOT_RUN"))report=new ValidationReport("NONE",0,0,"NOT_RUN","Not yet reached before the job stopped.");
                 job.tables.add(new TableResult(name,action,status,job.committed.contains(name)?plan.rows.getOrDefault(name,0L):0,
-                    job.validations.getOrDefault(name,"")+(job.finalized.contains(name)?" Complete.":job.committed.contains(name)?" Data committed; post-load work pending.":" "+job.message)));
+                    (report==null?"":describeValidation(report))+(job.finalized.contains(name)?" Complete.":job.committed.contains(name)?" Data committed; post-load work pending.":" "+job.message),report));
             }
             try{checkpoint(plan,job);}catch(Exception failure){job.state="RECOVERY_REQUIRED";job.uncertain=true;job.message="Could not persist final status. Inspect the target before retrying.";}
             DatabaseGateway.configure(null);DatabaseGateway.configureBackground(false);
           }
         }
     }
-    private String loadTable(Connection connection,Plan plan,Table table,Job job)throws Exception {
+    private static String describeValidation(ValidationReport r){
+        return switch(r.method()){
+            case "FINGERPRINT" -> "Validated row-count delta and order-independent SHA-256 aggregate (probabilistic content check).";
+            case "ROW_COUNT" -> "Validated row-count delta; SQL-expression content is not fingerprinted.";
+            case "NONE" -> r.skippedReason();
+            default -> r.method();
+        };
+    }
+    private ValidationReport loadTable(Connection connection,Plan plan,Table table,Job job)throws Exception {
         String name=table.name().in(plan.view.targetDialect());Path file=plan.data.get(name);long rows=0;
         DataFingerprint before=null,expected=null;long beforeCount=0;
         if(plan.options.validateData()){
@@ -459,15 +499,17 @@ public class MigrationService implements AutoCloseable {
             if(batch>0){statement.executeBatch();statement.clearBatch();job.progress.rowsSent+=batch;job.progress.bytes+=bytes;}
         }
         if(rows!=plan.rows.getOrDefault(name,0L))throw new IOException("Staged row count changed");
-        if(!plan.options.validateData())return "Validation disabled by user.";
+        if(!plan.options.validateData())return new ValidationReport("NONE",0,0,"PASSED","Validation disabled by user.");
         job.progress.phase="VALIDATING";
+        long validationStart=System.nanoTime();
         if(plan.typed.contains(name)){
             DataFingerprint after=DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.options,job.progress);
             if(!after.equals(before.plus(expected)))throw new IllegalArgumentException("Target content validation failed; transaction will roll back");
-            return "Validated row-count delta and order-independent SHA-256 aggregate (probabilistic content check).";
+            return new ValidationReport("FINGERPRINT",after.count(),(System.nanoTime()-validationStart)/1e9,"PASSED",null);
         }
-        if(count(connection,plan,table,job.progress)!=beforeCount+rows)throw new IllegalArgumentException("Target row-count validation failed; transaction will roll back");
-        return "Validated row-count delta; SQL-expression content is not fingerprinted.";
+        long afterCount=count(connection,plan,table,job.progress);
+        if(afterCount!=beforeCount+rows)throw new IllegalArgumentException("Target row-count validation failed; transaction will roll back");
+        return new ValidationReport("ROW_COUNT",afterCount,(System.nanoTime()-validationStart)/1e9,"PASSED",null);
     }
     private static void closeStreams(List<Closeable> streams)throws IOException{IOException failure=null;for(Closeable stream:streams)try{stream.close();}catch(IOException e){failure=e;}streams.clear();if(failure!=null)throw failure;}
     private long count(Connection connection,Plan plan,Table table,TransferProgress progress)throws SQLException{
@@ -486,12 +528,148 @@ public class MigrationService implements AutoCloseable {
     }
     public synchronized JobView job(String id) { Job job = jobs.get(id); if (job == null) throw new IllegalArgumentException("Job not found"); return job.view(); }
     public synchronized List<JobView> history(){return jobs.values().stream().map(Job::view).sorted(Comparator.comparing(JobView::id)).toList();}
-    public JobView cancel(String id){Job job=jobs.get(id);if(job==null)throw new IllegalArgumentException("Job not found");requestCancel(job.progress);return job.view();}
+    public JobView cancel(String id){Job job=jobs.get(id);if(job==null)throw new IllegalArgumentException("Job not found");requestCancel(job.revert!=null&&Set.of("QUEUED","RUNNING").contains(job.revert.state)?job.revert.progress:job.progress);return job.view();}
     public synchronized JobView resume(String id,ConnectionSpec target){
         Job job=jobs.get(id);if(job==null||!job.view().resumable())throw new IllegalArgumentException("This job cannot be automatically resumed. Reconcile uncertain target changes first.");
         Plan plan=plan(job.planId);if(target==null||!identity(target).equals(plan.targetIdentity))throw new IllegalArgumentException("Enter the original target connection to resume");
         job.progress.cancel=false;job.progress.finished=0;job.progress.started=System.currentTimeMillis();job.progress.rowsSent=job.progress.rowsCommitted;job.attempt++;job.state="QUEUED";checkpoint(plan,job);
         try{executor.execute(()->run(plan,target,job.actions,job));}catch(RejectedExecutionException e){job.state="FAILED";checkpoint(plan,job);throw new IllegalArgumentException("Worker queue full");}return job.view();
+    }
+    private Job requireRevert(String id,ConnectionSpec target){
+        Job job=jobs.get(id);
+        if(job==null)throw new IllegalArgumentException("Job not found");
+        Plan plan=plan(job.planId);
+        if(target==null||!Objects.equals(identity(target),plan.targetIdentity))throw new IllegalArgumentException("Enter the original target connection to review this revert");
+        if(job.uncertain||!job.state.equals("SUCCEEDED"))throw new IllegalArgumentException("Automatic revert requires a completed migration with a known commit outcome");
+        if(job.revert!=null&&(job.revert.running||!Set.of("FAILED","PARTIAL").contains(job.revert.state)))throw new IllegalArgumentException("Revert is already running, completed, or requires reconciliation");
+        return job;
+    }
+    private List<Table> revertTables(Plan plan,Job job){
+        List<Table> tables=plan.tables.stream().filter(t->{String n=t.name().in(plan.view.targetDialect());return job.actions.get(n)!=Action.SKIP&&(job.created.contains(n)||plan.rows.getOrDefault(n,0L)>0);}).toList();
+        if(tables.isEmpty())throw new IllegalArgumentException("This migration has no transferred rows or newly created tables to revert");
+        for(Table table:tables){
+            String name=table.name().in(plan.view.targetDialect());
+            if(!job.committed.contains(name)||!job.finalized.contains(name))throw new IllegalArgumentException("Migration records are incomplete; reconcile before reverting");
+            if(!job.targetObjectIds.containsKey(name))throw new IllegalArgumentException("This older migration has no saved target table identity; automatic revert is unavailable");
+            if(job.created.contains(name)){
+                if(!job.createdFingerprints.containsKey(name)&&!plan.typed.contains(name))throw new IllegalArgumentException("This older SQL-input migration has no saved table receipt; automatic revert is unavailable");
+            }else{
+                if(!plan.typed.contains(name))throw new IllegalArgumentException("SQL-input inserts into existing tables do not have reliable row receipts; automatic revert is unavailable");
+                RevertRows.keyTable(table,plan.view.targetDialect());
+            }
+        }
+        return RevertRows.deletionOrder(tables,plan.view.targetDialect());
+    }
+    private void checkRevertTarget(Connection connection,Plan plan,Job job,List<Table> tables,TransferProgress progress,boolean data)throws Exception{
+        Dialect dialect=plan.view.targetDialect();String schema=plan.view.targetSchema();Revert r=job.revert;
+        db.requireSchema(connection,schema);
+        Set<String> dropping=new HashSet<>(job.created);if(r!=null)dropping.removeAll(r.dropped);
+        for(Table table:tables){
+            progress.check();String name=table.name().in(dialect);progress.table=name;
+            Table current=db.inspect(connection,schema,name,dialect),expected=job.created.contains(name)?table:plan.targetTables.get(name);
+            if(current==null||expected==null||!Compatibility.differences(expected,current,dialect).isEmpty())throw new IllegalArgumentException("Revert blocked: target structure changed for "+name);
+            if(!job.targetObjectIds.get(name).equals(db.objectIdentity(connection,schema,name,dialect)))throw new IllegalArgumentException("Revert blocked: target table was replaced: "+name);
+            if(!RevertRows.indexes(expected,dialect).equals(RevertRows.indexes(current,dialect)))throw new IllegalArgumentException("Revert blocked: target indexes changed for "+name);
+            if(!data)continue;
+            if(job.created.contains(name)){
+                DataFingerprint saved=r!=null&&r.rowsRemoved?DataFingerprint.empty():job.createdFingerprints.get(name);
+                if(saved==null)saved=DataFingerprint.staged(plan.data.get(name),table,progress);
+                if((r==null||!r.rowsRemoved)&&saved.count()!=plan.rows.getOrDefault(name,0L))throw new IllegalArgumentException("Revert receipt row count differs for "+name);
+                if(!saved.equals(DataFingerprint.target(connection,table,schema,dialect,plan.options,progress)))throw new IllegalArgumentException("Revert blocked: newly created table "+name+" contains changed or additional data");
+            }else if(r==null||!r.rowsRemoved){
+                if(RevertRows.existing(connection,table,schema,dialect,plan.data.get(name),plan.options,progress,false)!=plan.rows.getOrDefault(name,0L))throw new IllegalArgumentException("Revert row receipt changed for "+name);
+            }
+        }
+        RevertRows.dependencies(connection,schema,tables,dropping,dialect);
+    }
+    public RevertPreview previewRevert(String id,ConnectionSpec target)throws Exception{
+        Job job;Plan plan;Revert previous;
+        synchronized(this){job=requireRevert(id,target);plan=plan(job.planId);previous=job.revert;}
+        List<Table> tables=revertTables(plan,job);verifyFiles(plan);
+        List<Table> remaining=tables.stream().filter(t->previous==null||!previous.dropped.contains(t.name().in(plan.view.targetDialect()))).toList();
+        DatabaseGateway.configure(plan.options);
+        try(Connection connection=db.connect(target)){
+            connection.setAutoCommit(false);
+            try{checkRevertTarget(connection,plan,job,remaining,new TransferProgress(),true);}finally{connection.rollback();}
+        }finally{DatabaseGateway.configure(null);}
+        synchronized(this){
+            requireRevert(id,target);if(job.revert!=previous)throw new IllegalArgumentException("Job changed while reviewing revert; review again");
+            long now=System.currentTimeMillis();revertTickets.entrySet().removeIf(e->e.getValue().expires()<now);
+            if(revertTickets.size()>=64)throw new IllegalArgumentException("Too many pending revert reviews");
+            String token=UUID.randomUUID().toString();long expires=now+300000;
+            revertTickets.put(token,new RevertTicket(id,identity(target),expires));
+            return new RevertPreview(token,id,target.dialect()+" "+target.host()+":"+target.port()+"/"+target.database()+" / "+plan.view.targetSchema(),
+                    tables.stream().map(t->{String n=t.name().in(plan.view.targetDialect());return new RevertTable(n,job.created.contains(n)?"DROP_TABLE":"DELETE_ROWS",plan.rows.getOrDefault(n,0L),
+                            previous!=null&&previous.dropped.contains(n)?"DROPPED":previous!=null&&previous.rowsRemoved?"ROWS_REMOVED":"PENDING");}).toList(),Instant.ofEpochMilli(expires).toString());
+        }
+    }
+    public synchronized JobView revert(String id,RevertRequest request){
+        Job job=requireRevert(id,request.target());Plan plan=plan(job.planId);
+        RevertTicket ticket=request.token()==null?null:revertTickets.remove(request.token());
+        if(ticket==null||!ticket.jobId().equals(id)||!ticket.targetIdentity().equals(identity(request.target()))||ticket.expires()<System.currentTimeMillis())throw new IllegalArgumentException("Revert review expired or does not match this job. Review again before confirming.");
+        List<Table> tables=revertTables(plan,job);Revert previous=job.revert;Revert r=new Revert();
+        r.tables=tables.stream().map(t->{String n=t.name().in(plan.view.targetDialect());return new RevertTable(n,job.created.contains(n)?"DROP_TABLE":"DELETE_ROWS",plan.rows.getOrDefault(n,0L),"PENDING");}).toList();
+        r.progress.totalRows=r.tables.stream().mapToLong(RevertTable::rows).sum();
+        if(previous!=null){r.rowsRemoved=previous.rowsRemoved;r.dropped.addAll(previous.dropped);r.progress.rowsCommitted=previous.progress.rowsCommitted;r.progress.rowsSent=r.progress.rowsCommitted;}
+        job.revert=r;r.running=true;
+        try{checkpoint(plan,job);}catch(RuntimeException error){job.revert=previous;throw error;}
+        try{executor.execute(()->runRevert(plan,job,request.target(),tables));}
+        catch(RejectedExecutionException error){r.running=false;r.state=r.rowsRemoved?"PARTIAL":"FAILED";r.message="Worker queue full; review and retry revert.";checkpoint(plan,job);throw new IllegalArgumentException(r.message);}
+        return job.view();
+    }
+    private void runRevert(Plan plan,Job job,ConnectionSpec target,List<Table> tables){
+        Revert r=job.revert;boolean risky=false;Connection connection=null;
+        r.state="RUNNING";r.progress.phase="CHECKING";r.message="Rechecking target rows and dependencies";
+        DatabaseGateway.configure(plan.options);DatabaseGateway.configureBackground(true);
+        try{
+            checkpoint(plan,job);verifyFiles(plan);r.progress.check();
+            connection=db.connect(target);connection.setAutoCommit(false);
+            List<Table> remaining=tables.stream().filter(t->!r.dropped.contains(t.name().in(plan.view.targetDialect()))).toList();
+            RevertRows.lock(connection,plan.view.targetSchema(),remaining,plan.view.targetDialect(),plan.options,r.progress);
+            checkRevertTarget(connection,plan,job,remaining,r.progress,true);
+            if(!r.rowsRemoved){
+                r.progress.phase="REMOVING_ROWS";r.message="Removing only this migration's rows";checkpoint(plan,job);
+                for(Table table:tables){
+                    r.progress.check();String name=table.name().in(plan.view.targetDialect());r.progress.table=name;long rows;
+                    if(job.created.contains(name)){
+                        try(Statement s=connection.createStatement()){
+                            s.setQueryTimeout(plan.options.queryTimeoutSeconds());r.progress.statement=s;
+                            rows=s.executeLargeUpdate("DELETE FROM "+qualified(plan.view.targetSchema(),table.name(),plan.view.targetDialect()));r.progress.rowsSent+=rows;
+                        }
+                    }else rows=RevertRows.existing(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.data.get(name),plan.options,r.progress,true);
+                    if(rows!=plan.rows.getOrDefault(name,0L))throw new IllegalArgumentException("Revert row count changed for "+name);
+                }
+                r.progress.check();risky=true;connection.commit();r.rowsRemoved=true;r.progress.rowsCommitted=r.progress.totalRows;checkpoint(plan,job);risky=false;
+            }else connection.rollback();
+            r.progress.phase="DROPPING_TABLES";r.message="Removing tables created by this migration";
+            for(Table table:tables){
+                String name=table.name().in(plan.view.targetDialect());if(!job.created.contains(name)||r.dropped.contains(name))continue;
+                r.progress.check();r.progress.table=name;
+                RevertRows.lock(connection,plan.view.targetSchema(),List.of(table),plan.view.targetDialect(),plan.options,r.progress);
+                // Validate all remaining dependencies again after the data commit. Never CASCADE.
+                remaining=tables.stream().filter(t->!r.dropped.contains(t.name().in(plan.view.targetDialect()))).toList();
+                checkRevertTarget(connection,plan,job,remaining,r.progress,true);checkpoint(plan,job);
+                try(Statement s=connection.createStatement()){
+                    s.setQueryTimeout(plan.options.queryTimeoutSeconds());r.progress.statement=s;risky=true;
+                    s.execute("DROP TABLE "+qualified(plan.view.targetSchema(),table.name(),plan.view.targetDialect()));connection.commit();
+                }
+                r.dropped.add(name);checkpoint(plan,job);risky=false;
+            }
+            r.state="REVERTED";r.message="Transferred rows removed and migration-created tables dropped. Existing tables and unrelated rows retained; identity/sequence values were not reset.";
+        }catch(Exception failure){
+            if(connection!=null)try{connection.rollback();}catch(SQLException rollback){risky=true;}
+            r.state=risky?"RECOVERY_REQUIRED":r.rowsRemoved?"PARTIAL":"FAILED";
+            r.message=risky?"A revert commit or DROP outcome is uncertain. Keep the saved files and reconcile the target; automatic retry is disabled.":
+                    failure instanceof IllegalArgumentException?failure.getMessage():failure instanceof CancellationException?"Revert cancelled at a safe boundary.":
+                    failure instanceof SQLException sql?"Revert: "+DatabaseErrorGuidance.describe(sql):"Revert failed. Check saved data, disk and database access.";
+            if(!risky)r.message+=r.rowsRemoved?" Row removal is committed; some new tables may remain. Review before retrying.":" Row removal was rolled back; no revert changes were committed.";
+        }finally{
+            r.progress.statement=null;
+            if(connection!=null)try{connection.close();}catch(SQLException ignored){}
+            r.progress.finished=System.currentTimeMillis();r.progress.phase=r.state;
+            synchronized(this){try{checkpoint(plan,job);}catch(Exception failure){r.state="RECOVERY_REQUIRED";r.message="Could not save the final revert result. Reconcile the target before further changes.";}finally{r.running=false;}}
+            DatabaseGateway.configure(null);DatabaseGateway.configureBackground(false);
+        }
     }
     public void validateDownload(String id,Map<String,Action> actions){
         Plan plan=plan(id);if(!plan.prepared)throw new IllegalArgumentException("Prepare data before downloading SQL");
@@ -530,7 +708,8 @@ public class MigrationService implements AutoCloseable {
             Map<String,Long> rows,Set<String> typed,Map<String,String> hashes,MigrationOptions options,String targetIdentity,
             String sourceInfo,String targetInfo,String sourceSchema,String sourceTables,String jobId,boolean executed) {}
     record JobManifest(int version,JobView view,Map<String,Action> actions,Set<String> created,Set<String> committed,Set<String> finalized,
-                       Map<String,String> validations,boolean uncertain,int attempt) {}
+                       Map<String,ValidationReport> validations,boolean uncertain,int attempt,Map<String,DataFingerprint> createdFingerprints,Map<String,String> targetObjectIds,RevertManifest revert) {}
+    record RevertManifest(String state,String message,boolean rowsRemoved,Set<String> dropped,List<RevertTable> tables,Progress progress) {}
     private void atomicJson(Path file,Object value)throws IOException{
         Path temp=file.resolveSibling(file.getFileName()+".tmp");byte[] bytes=json.writeValueAsBytes(value);
         try(var channel=java.nio.channels.FileChannel.open(temp,StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING,StandardOpenOption.WRITE)){
@@ -549,7 +728,9 @@ public class MigrationService implements AutoCloseable {
         try{
             // Persist submission before writes. A crash between these files fails closed on restore.
             persistPlan(plan);
-            atomicJson(plan.directory.resolve("job.json"),new JobManifest(1,job.view(),job.actions,job.created,job.committed,job.finalized,job.validations,job.uncertain,job.attempt));
+            Revert r=job.revert;
+            atomicJson(plan.directory.resolve("job.json"),new JobManifest(1,job.view(),job.actions,job.created,job.committed,job.finalized,job.validations,job.uncertain,job.attempt,job.createdFingerprints,job.targetObjectIds,
+                    r==null?null:new RevertManifest(r.state,r.message,r.rowsRemoved,r.dropped,r.tables,r.progress.view())));
         }catch(IOException e){throw new IllegalStateException("Could not persist migration state",e);}
     }
     private void verifyFiles(Plan plan)throws IOException{
@@ -580,6 +761,16 @@ public class MigrationService implements AutoCloseable {
                             JobManifest snapshot=json.readValue(Files.readAllBytes(directory.resolve("job.json")),JobManifest.class);
                             if(snapshot.version()!=1||!snapshot.view().id().equals(job.id)||!snapshot.view().planId().equals(job.planId))throw new IOException("Job identity changed");
                             job.actions=snapshot.actions();job.created.addAll(snapshot.created());job.committed.addAll(snapshot.committed());job.finalized.addAll(snapshot.finalized());job.validations.putAll(snapshot.validations());job.tables.addAll(snapshot.view().tables());job.attempt=snapshot.attempt();job.state=snapshot.view().state();job.message=snapshot.view().message();job.uncertain=snapshot.uncertain();if(snapshot.view().options()!=null)job.options=snapshot.view().options();
+                            if(snapshot.createdFingerprints()!=null)job.createdFingerprints.putAll(snapshot.createdFingerprints());
+                            if(snapshot.targetObjectIds()!=null)job.targetObjectIds.putAll(snapshot.targetObjectIds());
+                            if(snapshot.revert()!=null){
+                                RevertManifest savedRevert=snapshot.revert();Revert r=new Revert();job.revert=r;
+                                r.state=savedRevert.state();r.message=savedRevert.message();r.rowsRemoved=savedRevert.rowsRemoved();r.dropped.addAll(savedRevert.dropped());r.tables=List.copyOf(savedRevert.tables());
+                                r.progress.totalRows=savedRevert.progress().totalRows();r.progress.rowsCommitted=savedRevert.progress().rowsCommitted();r.progress.rowsSent=r.progress.rowsCommitted;
+                                r.progress.finished=System.currentTimeMillis();r.progress.started=r.progress.finished-savedRevert.progress().elapsedSeconds()*1000;
+                                if(Set.of("QUEUED","RUNNING").contains(r.state)){r.state="RECOVERY_REQUIRED";r.message="Revert was interrupted. Reconcile target rows and dropped tables before further changes.";}
+                                r.progress.phase=r.state;
+                            }
                             job.progress.finished=System.currentTimeMillis();job.progress.started=job.progress.finished-snapshot.view().progress().elapsedSeconds()*1000;job.progress.bytes=snapshot.view().progress().bytes();job.progress.totalRows=snapshot.view().progress().totalRows();job.progress.rowsCommitted=snapshot.view().progress().rowsCommitted();job.progress.rowsSent=job.progress.rowsCommitted;
                             if(Set.of("RUNNING","QUEUED").contains(job.state)){job.uncertain=true;job.state="RECOVERY_REQUIRED";job.message="Application stopped before final status was saved. Reconcile the target before replaying uncertain work.";}
                         }catch(Exception e){job.state="RECOVERY_REQUIRED";job.uncertain=true;job.message="Job journal is missing or damaged. Inspect the target; automatic replay is disabled.";}
@@ -602,15 +793,45 @@ public class MigrationService implements AutoCloseable {
     }
     private void entry(ZipOutputStream zip, String name, byte[] bytes) throws IOException { zip.putNextEntry(new ZipEntry(name)); zip.write(bytes); zip.closeEntry(); }
     private void write(OutputStream output, String text) throws IOException { output.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
-    public synchronized void delete(String id) throws IOException {
+    public void delete(String id) throws IOException { delete(id, false); }
+    /** acknowledgeUncertain bypasses the RECOVERY_REQUIRED/PARTIAL protection below for a deliberate,
+     * reviewed discard (P5 "allow reviewed discard") — never the default. Ordinary deletion (the
+     * false path) must keep failing for uncertain jobs: that evidence is exactly what a human needs
+     * to reconcile the target per RECOVERY-RUNBOOK.md before it is gone forever. */
+    public synchronized void delete(String id, boolean acknowledgeUncertain) throws IOException {
         Plan plan = plans.get(id); if (plan == null) throw new IllegalArgumentException("Plan not found");
         if (active(plan)) throw new IllegalArgumentException("Wait for this job before deleting its plan");
+        Job savedJob=plan.jobId==null?null:jobs.get(plan.jobId);
+        if(!acknowledgeUncertain&&savedJob!=null&&savedJob.state.equals("RECOVERY_REQUIRED"))throw new IllegalArgumentException("This job's commit outcome is uncertain. Reconcile the target first, or confirm you have reviewed it before discarding its evidence.");
+        if(!acknowledgeUncertain&&savedJob!=null&&savedJob.revert!=null&&Set.of("PARTIAL","RECOVERY_REQUIRED").contains(savedJob.revert.state))throw new IllegalArgumentException("Retain this job's files until its revert has been reconciled, or confirm you have reviewed it before discarding its evidence.");
         plans.remove(id); if (plan.jobId != null) jobs.remove(plan.jobId); erase(plan.directory);
+    }
+    public synchronized StorageView storage() throws IOException {
+        List<PlanStorage> details = new ArrayList<>(); long totalBytes = 0, reclaimable = 0;
+        Set<String> known = new HashSet<>();
+        for (Plan plan : plans.values()) {
+            long bytes = directoryBytes(plan.directory); totalBytes += bytes;
+            if (plan.directory != null) known.add(plan.directory.getFileName().toString());
+            boolean expiredInactive = Instant.parse(plan.view.expiresAt()).isBefore(Instant.now()) && !active(plan) && !plan.executed.get();
+            if (expiredInactive) reclaimable += bytes;
+            Job job = plan.jobId == null ? null : jobs.get(plan.jobId);
+            details.add(new PlanStorage(plan.view.id(), job == null ? "NOT_RUN" : job.state, bytes, plan.view.expiresAt(), expiredInactive));
+        }
+        List<String> orphans = new ArrayList<>();
+        if (Files.isDirectory(work)) try (var entries = Files.list(work)) {
+            for (Path entry : entries.filter(Files::isDirectory).toList()) if (!known.contains(entry.getFileName().toString())) orphans.add(entry.getFileName().toString());
+        }
+        long freeDisk = Files.exists(work) ? Files.getFileStore(work).getUsableSpace() : 0;
+        return new StorageView(totalBytes, freeDisk, reclaimable, List.copyOf(details), List.copyOf(orphans));
+    }
+    private long directoryBytes(Path directory) throws IOException {
+        if (directory == null || !Files.exists(directory)) return 0;
+        try (var files = Files.walk(directory)) { return files.filter(Files::isRegularFile).mapToLong(p -> { try { return Files.size(p); } catch (IOException e) { return 0; } }).sum(); }
     }
     private void cleanup() throws IOException {
         for (Plan plan : List.copyOf(plans.values())) if (Instant.parse(plan.view.expiresAt()).isBefore(Instant.now()) && !active(plan) && !plan.executed.get()) { plans.remove(plan.view.id()); if (plan.jobId != null) jobs.remove(plan.jobId); erase(plan.directory); }
     }
-    private boolean active(Plan plan) { Job job = plan.jobId == null ? null : jobs.get(plan.jobId); return job != null && (job.state.equals("RUNNING") || job.state.equals("QUEUED")); }
+    private boolean active(Plan plan) { Job job = plan.jobId == null ? null : jobs.get(plan.jobId); return job != null && (job.state.equals("RUNNING") || job.state.equals("QUEUED") || job.revert!=null&&(job.revert.running||Set.of("RUNNING","QUEUED").contains(job.revert.state))); }
     private void erase(Path directory) throws IOException {
         if (directory == null || !directory.normalize().getParent().equals(work)) throw new IllegalArgumentException("Invalid artifact directory");
         try (var files = Files.walk(directory)) { for (Path path : files.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path); }
@@ -622,6 +843,7 @@ public class MigrationService implements AutoCloseable {
     private void releaseLock(){try{if(workLock.isValid())workLock.release();lockChannel.close();}catch(IOException ignored){}}
     @Override @PreDestroy public void close() {
         preparations.values().forEach(p->requestCancel(p.progress));jobs.values().stream().filter(j->Set.of("QUEUED","RUNNING").contains(j.state)).forEach(j->requestCancel(j.progress));
+        jobs.values().stream().filter(j->j.revert!=null&&Set.of("QUEUED","RUNNING").contains(j.revert.state)).forEach(j->requestCancel(j.revert.progress));
         preparer.shutdown(); executor.shutdown();
         try{executor.awaitTermination(5,TimeUnit.SECONDS);preparer.awaitTermination(5,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}
         canceller.shutdown();

@@ -83,16 +83,41 @@ public final class Model {
     }
     public enum Status { NEW, MATCH, MISMATCH, UNCHECKED }
     public enum Action { CREATE_AND_LOAD, DML_ONLY, SKIP }
-    public record TableReport(String table, Status status, List<String> differences, List<String> warnings, long rows, List<Action> allowedActions, Long estimatedRows) {}
+    /** One structured column comparison entry (improvement-plan P3). kind is a short machine-readable
+     * category (MISSING_TARGET_COLUMN, EXTRA_TARGET_COLUMN, TYPE_MISMATCH, NULLABILITY_MISMATCH,
+     * IDENTITY_MISMATCH, DEFAULT_MISMATCH, KEY_OR_INDEX_MISMATCH); column/expected/actual may be null
+     * when the mismatch isn't scoped to one column (e.g. KEY_OR_INDEX_MISMATCH). correction is always
+     * present and human-readable. */
+    public record ColumnDifference(String column, String kind, String expected, String actual, String correction) {}
+    public record TableReport(String table, Status status, List<String> differences, List<String> warnings, long rows, List<Action> allowedActions, Long estimatedRows,
+                              List<ColumnDifference> columnComparison, List<String> dependsOn) {}
     public record StatementReport(int number, String kind, String status, String convertedSql, List<String> messages) {}
     public record PlanView(String id, Dialect sourceDialect, Dialect targetDialect, String targetSchema,
                            List<TableReport> tables, List<String> issues, List<String> warnings, boolean targetChecked, String expiresAt,
                            boolean orderedScript, List<StatementReport> statements, boolean prepared, MigrationOptions options) {}
     public record ExecuteRequest(ConnectionSpec target, Map<String, Action> actions) {}
-    public record TableResult(String table, Action action, String status, long rows, String message) {}
+    /** Per-table validation detail (improvement-plan P4). method: FINGERPRINT (typed data: full-table
+     * row count + order-independent SHA-256 content aggregate), ROW_COUNT (SQL-input: count only, not
+     * fingerprinted), or NONE (validateData=false). rowsChecked is the full target table's row count
+     * after load — there is no sampling or key-scoped mode yet; that is future work pending a policy
+     * decision, not implemented here. outcome is always PASSED: a failed check throws and rolls back
+     * the whole table transaction, so no ValidationReport is attached to a failed/not-run table. */
+    public record ValidationReport(String method, long rowsChecked, double durationSeconds, String outcome, String skippedReason) {}
+    public record TableResult(String table, Action action, String status, long rows, String message, ValidationReport validation) {}
+    /** Storage dashboard (improvement-plan P6). reclaimable is true when this plan is already past
+     * expiresAt, inactive and unexecuted — exactly what the existing automatic cleanup() would remove
+     * on the next plan creation. This is a read-only preview; nothing is deleted by viewing it.
+     * orphanedDirectories are work-directory entries with no matching tracked plan: per README, files
+     * left behind by a killed process are not automatically recovered or removed. */
+    public record PlanStorage(String id, String state, long bytes, String expiresAt, boolean reclaimable) {}
+    public record StorageView(long stagedBytes, long freeDiskBytes, long reclaimableBytes, List<PlanStorage> plans, List<String> orphanedDirectories) {}
     public record Progress(String phase, String table, long rowsRead, long rowsSent, long rowsCommitted, long bytes,
                            long totalRows, long elapsedSeconds, double rowsPerSecond, Long remainingSeconds, boolean cancelRequested) {}
-    public record JobView(String id, String state, List<TableResult> tables, String message, String planId, Progress progress, boolean resumable, MigrationOptions options) {}
+    public record RevertTable(String table, String action, long rows, String status) {}
+    public record RevertView(String state, String message, List<RevertTable> tables, Progress progress) {}
+    public record RevertPreview(String token, String jobId, String target, List<RevertTable> tables, String expiresAt) {}
+    public record RevertRequest(ConnectionSpec target, String token) {}
+    public record JobView(String id, String state, List<TableResult> tables, String message, String planId, Progress progress, boolean resumable, MigrationOptions options, RevertView revert) {}
     public record PreparationView(String id, String state, String message, Progress progress, PlanView plan) {}
     public static String qualified(String schema, Name table, Dialect target) { return quote(schema) + "." + table.sql(target); }
 }

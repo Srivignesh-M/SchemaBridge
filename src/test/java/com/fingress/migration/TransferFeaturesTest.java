@@ -72,6 +72,8 @@ class TransferFeaturesTest {
         }
         PlanView p=plan();JobView job=run(p,Action.CREATE_AND_LOAD);assertEquals("SUCCEEDED",job.state(),job.message());assertEquals(3,job.progress().rowsCommitted());
         assertTrue(job.tables().getFirst().message().contains("SHA-256"));
+        assertEquals("FINGERPRINT",job.tables().getFirst().validation().method());assertEquals(3,job.tables().getFirst().validation().rowsChecked());
+        assertEquals("PASSED",job.tables().getFirst().validation().outcome());assertTrue(job.tables().getFirst().validation().durationSeconds()>=0);
         try(Connection c=DriverManager.getConnection(targetUrl);Statement s=c.createStatement();ResultSet r=s.executeQuery("SELECT * FROM items ORDER BY id")){
             assertTrue(r.next());assertEquals(text,r.getString("note"));assertArrayEquals(binary,r.getBytes("payload"));assertEquals("1234567890123456789012.12345678",r.getBigDecimal("amount").toPlainString());
             assertTrue(r.next());assertEquals("",r.getString("note"));assertEquals(0,r.getBytes("payload").length);assertTrue(r.next());assertNull(r.getString("note"));assertNull(r.getBytes("payload"));
@@ -172,6 +174,21 @@ class TransferFeaturesTest {
         try(var files=Files.list(directory)){assertEquals(0,files.filter(Files::isDirectory).count(),"failed extraction must erase its partial plan and LOB files");}
         assertThrows(IllegalArgumentException.class,()->service.view(UUID.randomUUID().toString()));
     }
+    @Test void realDiskFullIsDetectedWithoutMockingTheDiskProbe()throws Exception {
+        // Unlike diskReserveExhaustionDuringLobStagingRemovesIncompleteArtifacts above (which fakes the
+        // probe function itself), this exercises DatabaseGateway's real, un-overridden diskSpaceProbe() —
+        // RowStore.SYSTEM_DISK_SPACE, backed by the real Files.getFileStore(path).getUsableSpace() — against
+        // the real temp-directory filesystem. No disk is actually filled; an unrealistically large reserve
+        // (100 TB) makes any real disk's genuine free space report as insufficient, which is a safe way to
+        // trigger a real "not enough free space" condition without destructive filesystem manipulation.
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");
+        DatabaseGateway realDiskProbe=new DatabaseGateway(){@Override public Connection connect(ConnectionSpec spec)throws SQLException{return DriverManager.getConnection(spec.host().equals("source")?sourceUrl:targetUrl);}};
+        service.close();service=new MigrationService(realDiskProbe,json,directory.toString(),2_000_000,30);
+        MigrationOptions hugeReserve=new MigrationOptions(null,null,100_000_000_000_000L,null,null,null,null,null,null,null);
+        java.io.IOException error=assertThrows(java.io.IOException.class,()->service.create(request(false,Map.of(),hugeReserve)));
+        assertTrue(error.getMessage().contains("Disk reserve"),error.getMessage());
+        try(var files=Files.list(directory)){assertEquals(0,files.filter(Files::isDirectory).count(),"failed extraction must erase its partial plan");}
+    }
     @Test void cancellationRollsBackCurrentTableAndAllowsSafeResume()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items SELECT * FROM SYSTEM_RANGE(1,2500)");
         CountDownLatch inBatch=new CountDownLatch(1),release=new CountDownLatch(1);
@@ -205,6 +222,11 @@ class TransferFeaturesTest {
         assertEquals("RECOVERY_REQUIRED",job.state(),job.message());assertFalse(job.resumable());
         assertEquals(1,count("items"));assertEquals(0,job.progress().rowsCommitted());
         assertThrows(IllegalArgumentException.class,()->service.resume(job.id(),target));
+        // P5: a RECOVERY_REQUIRED job's evidence must survive ordinary deletion. Only an explicit,
+        // reviewed acknowledgement may discard it.
+        assertThrows(IllegalArgumentException.class,()->service.delete(plan.id()));
+        service.delete(plan.id(),true);
+        assertThrows(IllegalArgumentException.class,()->service.job(job.id()));
     }
     @Test void failedBatchAndRollbackRequireReconciliation()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");sql(targetUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY)");

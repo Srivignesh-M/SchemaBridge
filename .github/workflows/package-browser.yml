@@ -1,0 +1,47 @@
+name: Package Browser edition zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to stamp on the package (matches -Version on the packaging script)'
+        required: false
+        default: '1.0.0'
+
+jobs:
+  package-browser:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (provides jlink/jpackage)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and verify once (mvn verify)
+        run: mvn -B -ntp verify
+
+      - name: Package Browser edition zip
+        shell: pwsh
+        run: ./scripts/package-browser.ps1 -SkipBuild -Version "${{ inputs.version }}"
+
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path dist -Include *.zip,*.exe -Recurse -File |
+            ForEach-Object { Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 } |
+            ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -LiteralPath (Join-Path 'dist' 'SHA256SUMS.txt') -Encoding utf8
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: fingress-sql-migration-browser-${{ inputs.version }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
