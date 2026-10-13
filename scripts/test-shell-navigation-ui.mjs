@@ -13,7 +13,7 @@ const JS_FILES=['format','api','toast','state','status-badge','progress-panel','
 try {
   let combined='';
   for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
-  combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8')+'\nwindow.SchemaBridgeState=SchemaBridgeState;window.renderJob=renderJob;window.pollJob=pollJob;window.navigateToPage=navigateToPage;window.currentPageId=currentPageId;';
+  combined+=await readFile(new URL('../src/main/resources/static/js/main.js',import.meta.url),'utf8')+'\nwindow.SchemaBridgeState=SchemaBridgeState;window.renderJob=renderJob;window.pollJob=pollJob;window.navigateToPage=navigateToPage;window.currentPageId=currentPageId;';
   window.eval(combined);
 
   // The user is on the Migration page, as if they had just started a job there.

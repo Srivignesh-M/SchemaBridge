@@ -20,7 +20,7 @@ const lastError=()=>Array.from(window.document.querySelectorAll('[data-toast-typ
 try {
   let combined='';
   for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
-  combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8');
+  combined+=await readFile(new URL('../src/main/resources/static/js/main.js',import.meta.url),'utf8');
   window.eval(combined);
   await settle();
   assert.equal(el('targetDatabase').value,'postgres');

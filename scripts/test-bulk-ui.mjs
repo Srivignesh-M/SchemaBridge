@@ -11,7 +11,7 @@ window.fetch=async()=>({ok:true,json:async()=>({dialects:['ORACLE','POSTGRESQL']
 const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page','storage-page','settings-page','dashboard-page','shell'];
 let combinedScript='';
 for (const file of JS_FILES) combinedScript+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
-combinedScript+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8') + '\nwindow.loadSqlFiles = loadSqlFiles;';
+combinedScript+=await readFile(new URL('../src/main/resources/static/js/main.js',import.meta.url),'utf8') + '\nwindow.loadSqlFiles = loadSqlFiles;';
 window.eval(combinedScript);
 const el=id=>window.document.getElementById(id);
 const lastError=()=>Array.from(window.document.querySelectorAll('[data-toast-type="error"]')).at(-1)?.textContent||'';

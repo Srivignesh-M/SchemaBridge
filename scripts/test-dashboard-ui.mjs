@@ -17,7 +17,7 @@ window.fetch = async (path) => ({
 try {
   let combined='';
   for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
-  combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8');
+  combined+=await readFile(new URL('../src/main/resources/static/js/main.js',import.meta.url),'utf8');
   window.eval(combined);
 
   await window.renderDashboard();
