@@ -34,28 +34,7 @@ $('confirmRevert').addEventListener('click',async()=>{
   catch(e){clearRevertReview();$('revertState').textContent=e.message;error(e.message);}
 });
 $('cancelRevert').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
-const flow = () => document.querySelector('input[name="flow"]:checked').value;
-const usesDatabase = () => flow().startsWith('db-');
-const writesDatabase = () => flow().endsWith('-db');
 async function loadTables() { $('columnOptions').replaceChildren();fillOptions($('sourceTables'),[]); try { const schema = $('sourceSchemaSelect').value; if (schema) fillOptions($('sourceTables'), await (await api('/tables', {connection:connection('source'),schema})).json()); renderTablePicker(); } catch(e) { renderTablePicker();error(e.message); } }
-function goToStep(step, scroll=true) {
-  if (step > SchemaBridgeState.migration.maxStep || step < 1) return;
-  SchemaBridgeState.migration.currentStep = step;
-  document.querySelectorAll('[data-step-page]').forEach(page => page.hidden = Number(page.dataset.stepPage) !== step);
-  document.querySelectorAll('[data-step-nav]').forEach(button => {
-    const number = Number(button.dataset.stepNav), active = number === step;
-    button.classList.toggle('active', active); button.classList.toggle('complete', number < step);
-    button.disabled = number > SchemaBridgeState.migration.maxStep;
-    if (active) button.setAttribute('aria-current','step'); else button.removeAttribute('aria-current');
-  });
-  if (scroll) window.scrollTo({top:0,behavior:'smooth'});
-}
-function updateFlow() {
-  $('sourceConnection').hidden = !usesDatabase(); $('tableSelection').hidden = !usesDatabase(); $('filesInput').hidden = usesDatabase(); $('targetConnection').hidden = !writesDatabase();
-  for (const prefix of ['source','target']) $(prefix + 'Connection').querySelectorAll('input,select,button').forEach(field => field.disabled = $(prefix + 'Connection').hidden);
-  $('openTablePicker').disabled = !usesDatabase() || !$('sourceSchemaSelect').value;
-  invalidate();
-}
 connectionForm('source'); connectionForm('target');
 document.querySelectorAll('input[name="flow"]').forEach(input => input.addEventListener('change', updateFlow));
 document.querySelectorAll('[data-step-nav]').forEach(button => button.addEventListener('click',()=>goToStep(Number(button.dataset.stepNav))));
@@ -65,35 +44,6 @@ $('reviewNext').addEventListener('click',()=>{if(!SchemaBridgeState.migration.pl
 $('startOver').addEventListener('click',()=>{SchemaBridgeState.migration.plan=null;SchemaBridgeState.migration.lastRequest=null;SchemaBridgeState.migration.maxStep=1;$('reportSection').hidden=true;$('outputActions').hidden=true;$('preparationSection').hidden=true;$('jobSection').hidden=true;goToStep(1);});
 $('configuration').addEventListener('input', invalidate);
 for (const prefix of ['source','target']) $(prefix + 'Dialect').addEventListener('change', () => { if(prefix==='source')$('columnOptions').replaceChildren(); applyDialect(prefix); fillOptions($(prefix + 'SchemaSelect'), []); if(prefix === 'source') {fillOptions($('sourceTables'), []);$('columnOptions').replaceChildren();renderTablePicker();} else $('targetSchema').value = $('targetDialect').value === 'ORACLE' ? 'APP' : 'public'; });
-let uploadVersion = 0;
-async function loadSqlFiles(input) {
-  const selected = Array.from(input.files);
-  if (!selected.length) return;
-  const version = ++uploadVersion;
-  invalidate(); $('sql').value = ''; $('fileNames').textContent = 'Reading files…'; $('analyse').disabled = true;
-  $('sql').disabled = true; $('example').disabled = true;
-  try {
-    const path = file => file.webkitRelativePath || file.name;
-    const files = selected.filter(file => /\.(sql|ddl|dml|txt)$/i.test(file.name)).sort((a,b) => path(a).localeCompare(path(b), 'en', {numeric:true}) || path(a).localeCompare(path(b), 'en', {sensitivity:'variant'}));
-    if (!files.length) throw new Error('No .sql, .ddl, .dml or .txt files found in the selection.');
-    if (files.reduce((size,file) => size + file.size,0) > 10000000) throw new Error('Files exceed 10 MB total. Choose a smaller batch.');
-    const parts = [];
-    for (const file of files) {
-      const text = await file.text();
-      if (version !== uploadVersion) return;
-      parts.push('-- Source file: ' + path(file).replace(/[\r\n\u2028\u2029]/g,' ') + '\n' + text.replace(/^\uFEFF/,''));
-    }
-    const combined = parts.join('\n;\n');
-    if (new TextEncoder().encode(combined).length > 10000000) throw new Error('Combined SQL exceeds 10 MB including file markers. Choose a smaller batch.');
-    $('sql').value = combined;
-    $('fileNames').textContent = `${files.length} files loaded; ${selected.length-files.length} other files ignored. Order: ` + files.map(path).join(' → ');
-    $(input.id === 'folder' ? 'files' : 'folder').value = '';
-  } catch(e) {
-    if (version === uploadVersion) { $('fileNames').textContent = 'No files loaded.'; error(e.message); }
-  } finally {
-    if (version === uploadVersion) { $('analyse').disabled = false; $('sql').disabled = false; $('example').disabled = false; }
-  }
-}
 for (const id of ['files','folder']) $(id).addEventListener('change', () => loadSqlFiles($(id)));
 $('example').addEventListener('click', () => { $('sourceDialect').value = 'ORACLE'; $('targetDialect').value = 'POSTGRESQL'; $('sql').value = "CREATE TABLE customers (\n  id NUMBER(10,0) PRIMARY KEY,\n  name VARCHAR2(100) NOT NULL,\n  joined_at DATE\n);\nINSERT INTO customers (id,name,joined_at) VALUES (1,'Anita',TIMESTAMP '2026-01-15 09:30:00');\nINSERT INTO customers (id,name,joined_at) VALUES (2,'Sam',NULL);"; invalidate(); });
 $('configuration').addEventListener('submit', async event => {
@@ -107,15 +57,15 @@ $('configuration').addEventListener('submit', async event => {
 function cell(row,text) { const td = document.createElement('td'); td.textContent = text; row.append(td); return td; }
 function renderPlan() {
   $('reportSection').hidden = false; $('reportMessages').replaceChildren(); $('reportRows').replaceChildren();
-  $('outputActions').hidden = false; $('reviewNext').disabled = false; $('reviewStatus').textContent = 'Review complete. Continue when you are ready to export or run the SchemaBridgeState.migration.plan.';
+  $('outputActions').hidden = false; $('reviewNext').disabled = false; $('reviewStatus').textContent = 'Review complete. Continue when you are ready to export or run the plan.';
   $('outputTitle').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Download converted script' : 'Ready to export or execute';
-  $('outputDescription').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'This script preserves statement order and is provided as a review package.' : 'Choose an export or run the reviewed SchemaBridgeState.migration.plan against the target database.';
+  $('outputDescription').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'This script preserves statement order and is provided as a review package.' : 'Choose an export or run the reviewed plan against the target database.';
   $('reportTitle').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Review the script in execution order' : 'Review every table';
   $('matchAll').hidden = !!SchemaBridgeState.migration.plan.orderedScript; $('tableReport').hidden = !!SchemaBridgeState.migration.plan.orderedScript;
   $('statementSection').hidden = !SchemaBridgeState.migration.plan.orderedScript; $('statementRows').replaceChildren();
   $('previewTitle').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Preview full converted script in original order' : 'Preview converted table definitions';
   $('download').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Download ordered review draft' : 'Download SQL package';
-  $('executionNote').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'This lifecycle script includes operations whose order matters. Download preserves all converted statements and marks source errors in place. Per-table actions and automatic execution are disabled; no target changes are made.' : 'Run selected SchemaBridgeState.migration.plan writes to the inspected target database. DDL and previously committed tables can remain after failure. Prepared plans are retained for 30 days. Job history remains until deleted.';
+  $('executionNote').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'This lifecycle script includes operations whose order matters. Download preserves all converted statements and marks source errors in place. Per-table actions and automatic execution are disabled; no target changes are made.' : 'Run selected plan writes to the inspected target database. DDL and previously committed tables can remain after failure. Prepared plans are retained for 30 days. Job history remains until deleted.';
   if (SchemaBridgeState.migration.plan.orderedScript) {
     const statements = SchemaBridgeState.migration.plan.statements || [], errors = statements.filter(s => ['ERROR','UNSUPPORTED'].includes(s.status)).length;
     $('statementSummary').textContent = `${statements.length} statements · ${statements.length - errors} converted (including review warnings) · ${errors} errors / unsupported statements. No statements are silently omitted.`;
@@ -127,7 +77,7 @@ function renderPlan() {
     const totalRows = SchemaBridgeState.migration.plan.tables.reduce((sum,t) => sum + (t.rows||0), 0);
     const hasUnextracted = SchemaBridgeState.migration.plan.tables.some(t => (t.rows||0)===0 && t.estimatedRows!=null);
     $('quotaSummary').textContent = SchemaBridgeState.migration.plan.prepared===false
-      ? `Row budget: ${maxRows.toLocaleString()} total across this SchemaBridgeState.migration.plan. Per-table counts are not yet extracted.`
+      ? `Row budget: ${maxRows.toLocaleString()} total across this plan. Per-table counts are not yet extracted.`
       : `Row budget used: ${totalRows.toLocaleString()} / ${maxRows.toLocaleString()} (${((totalRows/maxRows)*100).toFixed(1)}%)${hasUnextracted?' — some tables show an estimate only':''}.`;
   } else $('quotaSummary').textContent = '';
   const findingKindLabel = {MISSING_TARGET_COLUMN:'Missing column',EXTRA_TARGET_COLUMN:'Extra column',TYPE_MISMATCH:'Type mismatch',NULLABILITY_MISMATCH:'Nullability',IDENTITY_MISMATCH:'Identity',DEFAULT_MISMATCH:'Default value',KEY_OR_INDEX_MISMATCH:'Keys/indexes',ORACLE_IDENTITY_DML_BLOCKED:'Identity + DML only'};
@@ -195,8 +145,8 @@ $('prepareData').addEventListener('click',async()=>{if(!SchemaBridgeState.migrat
   const started=await(await api('/preparations',request)).json();SchemaBridgeState.migration.preparationId=started.id;$('preparationSection').hidden=false;$('cancelPreparation').hidden=false;$('prepareData').disabled=true;
   async function poll(){try{const current=await(await api('/preparations/'+started.id,undefined,'GET')).json();$('preparationState').textContent=current.message;renderProgress('preparation',current.progress);
     if(['QUEUED','PREPARING'].includes(current.state)){SchemaBridgeState.migration.preparationPoll=setTimeout(poll,1000);return;}
-    $('cancelPreparation').hidden=true;$('prepareData').disabled=false;if(current.state==='READY'&&version===SchemaBridgeState.migration.requestVersion){SchemaBridgeState.migration.plan=current.SchemaBridgeState.migration.plan;renderPlan();$('preview').textContent=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
-    if(current.state==='READY'&&version!==SchemaBridgeState.migration.requestVersion)await api('/plans/'+current.SchemaBridgeState.migration.plan.id,undefined,'DELETE');
+    $('cancelPreparation').hidden=true;$('prepareData').disabled=false;if(current.state==='READY'&&version===SchemaBridgeState.migration.requestVersion){SchemaBridgeState.migration.plan=current.plan;renderPlan();$('preview').textContent=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
+    if(current.state==='READY'&&version!==SchemaBridgeState.migration.requestVersion)await api('/plans/'+current.plan.id,undefined,'DELETE');
     if(current.state==='FAILED')error(current.message);
   }catch(e){$('prepareData').disabled=false;error(e.message);}}
   await poll();
@@ -248,7 +198,7 @@ async function refreshStorage(){
       const div=document.createElement('div');const dt=document.createElement('dt');dt.textContent=label;const dd=document.createElement('dd');dd.textContent=value;div.append(dt,dd);metrics.append(div);
     }
     const orphans=$('storageOrphans');
-    if(s.orphanedDirectories.length){orphans.hidden=false;orphans.textContent=`${s.orphanedDirectories.length} orphaned work-directory folder${s.orphanedDirectories.length===1?'':'s'} found with no matching saved SchemaBridgeState.migration.plan (left over from an interrupted run). Review and remove manually if no longer needed.`;}
+    if(s.orphanedDirectories.length){orphans.hidden=false;orphans.textContent=`${s.orphanedDirectories.length} orphaned work-directory folder${s.orphanedDirectories.length===1?'':'s'} found with no matching saved plan (left over from an interrupted run). Review and remove manually if no longer needed.`;}
     else orphans.hidden=true;
   }catch(e){error(e.message);}
   finally{button.disabled=false;}
