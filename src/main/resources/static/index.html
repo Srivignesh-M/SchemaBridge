@@ -23,6 +23,7 @@
   <script src="/js/history-page.js" defer></script>
   <script src="/js/storage-page.js" defer></script>
   <script src="/js/settings-page.js" defer></script>
+  <script src="/js/dashboard-page.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -37,6 +38,14 @@
   </nav>
 </header>
 <main>
+  <section id="dashboardPage" class="app-page">
+    <div class="section-heading"><h2>Dashboard</h2><p class="muted">Database Migration Workspace</p></div>
+    <div id="dashboardQuickStart" class="dashboard-quick"></div>
+    <section class="card"><div class="section-title"><h2>Recent Migration Activity</h2><button id="dashboardRefresh" type="button" class="secondary">Refresh</button></div>
+      <div class="table-scroll"><table><thead><tr><th>Source</th><th>Target</th><th>Status</th><th>Rows</th></tr></thead><tbody id="dashboardActivity"></tbody></table></div>
+    </section>
+    <section class="card"><h2>Storage</h2><dl class="progress-metrics" id="dashboardStorage"></dl></section>
+  </section>
   <form id="configuration">
     <section class="wizard-page" data-step-page="1">
       <div class="card">
