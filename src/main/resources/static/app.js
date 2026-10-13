@@ -1,28 +1,23 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let plan = null, finalJob = null, polling = null, errorTimer = null, lastRequest = null, preparationId = null, preparationPoll = null, requestVersion = 0, currentStep = 1, maxStep = 1;
-const databaseNames = {source: {}, target: {}};
-const catalogSelection = {source:null,target:null};
-let catalogLoading = false;
-let pendingRevert = null;
 function revertBusy(job){return !!job?.revert && ['QUEUED','RUNNING'].includes(job.revert.state);}
 function jobBusy(job){return ['QUEUED','RUNNING'].includes(job.state)||revertBusy(job);}
-function clearRevertReview(){pendingRevert=null;$('revertReview').hidden=true;$('acknowledgeRevert').checked=false;$('confirmRevert').disabled=true;}
+function clearRevertReview(){SchemaBridgeState.migration.pendingRevert=null;$('revertReview').hidden=true;$('acknowledgeRevert').checked=false;$('confirmRevert').disabled=true;}
 function renderRevert(){
-  const r=finalJob?.revert;
-  $('revertSection').hidden=!finalJob||(finalJob.state!=='SUCCEEDED'&&!r);
-  if(pendingRevert&&(pendingRevert.jobId!==finalJob?.id||revertBusy(finalJob)))clearRevertReview();
-  const canReview=finalJob?.state==='SUCCEEDED'&&(!r||['FAILED','PARTIAL'].includes(r.state));
-  $('reviewRevert').hidden=!canReview;$('reviewRevert').disabled=false;$('cancelRevert').hidden=!revertBusy(finalJob);
+  const r=SchemaBridgeState.migration.finalJob?.revert;
+  $('revertSection').hidden=!SchemaBridgeState.migration.finalJob||(SchemaBridgeState.migration.finalJob.state!=='SUCCEEDED'&&!r);
+  if(SchemaBridgeState.migration.pendingRevert&&(SchemaBridgeState.migration.pendingRevert.jobId!==SchemaBridgeState.migration.finalJob?.id||revertBusy(SchemaBridgeState.migration.finalJob)))clearRevertReview();
+  const canReview=SchemaBridgeState.migration.finalJob?.state==='SUCCEEDED'&&(!r||['FAILED','PARTIAL'].includes(r.state));
+  $('reviewRevert').hidden=!canReview;$('reviewRevert').disabled=false;$('cancelRevert').hidden=!revertBusy(SchemaBridgeState.migration.finalJob);
   $('revertState').textContent=r?`${r.state}: ${r.message} ${r.progress.rowsCommitted.toLocaleString()} rows removed by committed revert work.`:'Select Review revert to check this job against the target before removing anything.';
   $('revertResults').replaceChildren();
   for(const table of r?.tables||[]){const item=document.createElement('li');item.textContent=`${table.table}: ${table.status} · ${table.rows.toLocaleString()} original rows · ${table.action==='DROP_TABLE'?'drop migration-created table':'remove transferred rows'}`;$('revertResults').append(item);}
 }
 $('reviewRevert').addEventListener('click',async()=>{
-  const id=finalJob.id;clearRevertReview();$('reviewRevert').disabled=true;$('revertState').textContent='Checking target data and dependencies…';
+  const id=SchemaBridgeState.migration.finalJob.id;clearRevertReview();$('reviewRevert').disabled=true;$('revertState').textContent='Checking target data and dependencies…';
   try{
     const review=await(await api('/jobs/'+id+'/revert-preview',connection('target'))).json();
-    if(finalJob?.id!==id)return;pendingRevert=review;
+    if(SchemaBridgeState.migration.finalJob?.id!==id)return;SchemaBridgeState.migration.pendingRevert=review;
     $('revertTarget').textContent=`Job ${review.jobId} · Target: ${review.target}`;
     $('revertExpiry').textContent='Review expires at '+new Date(review.expiresAt).toLocaleTimeString()+'. The target is checked again when you confirm.';
     $('revertTables').replaceChildren();
@@ -30,17 +25,17 @@ $('reviewRevert').addEventListener('click',async()=>{
     $('revertReview').hidden=false;$('revertState').textContent='Review the removal below. Nothing has been removed.';$('revertReview').scrollIntoView({behavior:'smooth',block:'center'});
   }catch(e){$('revertState').textContent=e.message;error(e.message);}finally{$('reviewRevert').disabled=false;}
 });
-$('acknowledgeRevert').addEventListener('change',()=>{$('confirmRevert').disabled=!pendingRevert||!$('acknowledgeRevert').checked;});
+$('acknowledgeRevert').addEventListener('change',()=>{$('confirmRevert').disabled=!SchemaBridgeState.migration.pendingRevert||!$('acknowledgeRevert').checked;});
 $('dismissRevert').addEventListener('click',()=>{clearRevertReview();renderRevert();});
 $('confirmRevert').addEventListener('click',async()=>{
-  if(!pendingRevert||!$('acknowledgeRevert').checked||pendingRevert.jobId!==finalJob.id)return;
-  const review=pendingRevert;$('confirmRevert').disabled=true;
-  try{finalJob=await(await api('/jobs/'+review.jobId+'/revert',{target:connection('target'),token:review.token})).json();clearRevertReview();renderJob();pollJob();}
+  if(!SchemaBridgeState.migration.pendingRevert||!$('acknowledgeRevert').checked||SchemaBridgeState.migration.pendingRevert.jobId!==SchemaBridgeState.migration.finalJob.id)return;
+  const review=SchemaBridgeState.migration.pendingRevert;$('confirmRevert').disabled=true;
+  try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+review.jobId+'/revert',{target:connection('target'),token:review.token})).json();clearRevertReview();renderJob();pollJob();}
   catch(e){clearRevertReview();$('revertState').textContent=e.message;error(e.message);}
 });
-$('cancelRevert').addEventListener('click',async()=>{try{finalJob=await(await api('/jobs/'+finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
+$('cancelRevert').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
 function setCatalogMode(prefix, selection) {
-  catalogSelection[prefix] = selection;
+  SchemaBridgeState.migration.catalogSelection[prefix] = selection;
   $(prefix+'Dialect').disabled = !!selection;
   for (const suffix of ['Host','Port','Database','Username','Password']) $(prefix+suffix).readOnly = !!selection;
   if (selection) {
@@ -55,8 +50,8 @@ function setCatalogMode(prefix, selection) {
   invalidate();
 }
 async function loadCatalog() {
-  if (catalogLoading) return;
-  catalogLoading = true;
+  if (SchemaBridgeState.migration.catalogLoading) return;
+  SchemaBridgeState.migration.catalogLoading = true;
   for(const prefix of ['source','target']) $(prefix+'CatalogRefresh').disabled = true;
   try {
     const result = await (await api('/datasources',undefined,'GET')).json();
@@ -65,21 +60,15 @@ async function loadCatalog() {
       const select=$(prefix+'Catalog'), selected=select.value; select.replaceChildren(new Option('Manual entry',''));
       for(const item of result.datasources) { const option=new Option(`${item.name} (#${item.id})${item.supported?' — '+item.dialect:' — '+item.finding}`,String(item.id)); option.disabled=!item.supported; option.title=item.description || ''; select.add(option); }
       select.value=selected;
-      if (!select.value && catalogSelection[prefix]) setCatalogMode(prefix,null);
+      if (!select.value && SchemaBridgeState.migration.catalogSelection[prefix]) setCatalogMode(prefix,null);
       $(prefix+'CatalogStatus').textContent = result.datasources.length+' active, approved master JDBC entries. Select one, then connect.';
     }
   } catch(e) { error(e.message); }
-  finally { catalogLoading=false; for(const prefix of ['source','target']) $(prefix+'CatalogRefresh').disabled = $(prefix+'Connection').hidden; }
+  finally { SchemaBridgeState.migration.catalogLoading=false; for(const prefix of ['source','target']) $(prefix+'CatalogRefresh').disabled = $(prefix+'Connection').hidden; }
 }
 const flow = () => document.querySelector('input[name="flow"]:checked').value;
 const usesDatabase = () => flow().startsWith('db-');
 const writesDatabase = () => flow().endsWith('-db');
-const error = message => { $('error').textContent = message; $('error').hidden = false; clearTimeout(errorTimer); errorTimer = setTimeout(() => $('error').hidden = true, 15000); };
-async function api(path, body, method = 'POST') {
-  const response = await fetch('/api' + path, {method, headers: {'Content-Type':'application/json','X-Migration-Client':'migration-ui'}, ...(body === undefined ? {} : {body:JSON.stringify(body)})});
-  if (!response.ok) { let message = 'Request failed (' + response.status + ')'; try { message = (await response.json()).message || message; } catch (_) {} throw new Error(message); }
-  return response;
-}
 function connectionForm(prefix) {
   const host = document.createElement('div');
   // Template contains only fixed application markup, never database or user content.
@@ -102,15 +91,15 @@ function connectionForm(prefix) {
   $(prefix + 'Database').addEventListener('input', () => $(prefix + 'Database').setCustomValidity(''));
   $(prefix + 'Connect').addEventListener('click', async () => {
     const button = $(prefix + 'Connect'); button.disabled = true;
-    try { const schemas = await (await api('/schemas', connection(prefix))).json(); fillOptions($(prefix + 'SchemaSelect'), schemas); const preferred=catalogSelection[prefix]?.schema; if(preferred && schemas.includes(preferred)) $(prefix+'SchemaSelect').value=preferred; $('configStatus').textContent = 'Connected. Select a schema.'; invalidate(); if (prefix === 'source') await loadTables(); else $('targetSchema').value = $(prefix + 'SchemaSelect').value; }
+    try { const schemas = await (await api('/schemas', connection(prefix))).json(); fillOptions($(prefix + 'SchemaSelect'), schemas); const preferred=SchemaBridgeState.migration.catalogSelection[prefix]?.schema; if(preferred && schemas.includes(preferred)) $(prefix+'SchemaSelect').value=preferred; $('configStatus').textContent = 'Connected. Select a schema.'; invalidate(); if (prefix === 'source') await loadTables(); else $('targetSchema').value = $(prefix + 'SchemaSelect').value; }
     catch (e) { error(e.message); } finally { button.disabled = false; }
   });
   $(prefix + 'SchemaSelect').addEventListener('change', async () => { invalidate(); if (prefix === 'source') await loadTables(); else $('targetSchema').value = $(prefix + 'SchemaSelect').value; });
 }
 function applyDialect(prefix) {
   const dialect = $(prefix + 'Dialect').value, field = $(prefix + 'Database');
-  if (field.dataset.dialect) databaseNames[prefix][field.dataset.dialect] = field.value;
-  field.value = databaseNames[prefix][dialect] ?? (dialect === 'POSTGRESQL' ? 'postgres' : '');
+  if (field.dataset.dialect) SchemaBridgeState.migration.databaseNames[prefix][field.dataset.dialect] = field.value;
+  field.value = SchemaBridgeState.migration.databaseNames[prefix][dialect] ?? (dialect === 'POSTGRESQL' ? 'postgres' : '');
   field.dataset.dialect = dialect; field.setCustomValidity('');
   field.placeholder = dialect === 'POSTGRESQL' ? 'postgres or your application database' : 'For example, XEPDB1';
   $(prefix + 'DatabaseLabel').textContent = dialect === 'POSTGRESQL' ? 'PostgreSQL database name' : 'Oracle service name';
@@ -120,7 +109,7 @@ function applyDialect(prefix) {
   $(prefix + 'Port').value = dialect === 'ORACLE' ? '1521' : '5432';
 }
 function connection(prefix) {
-  if ($(prefix+'Catalog').value && String(catalogSelection[prefix]?.id) !== $(prefix+'Catalog').value) throw new Error('Wait for the selected LCNC datasource to load.');
+  if ($(prefix+'Catalog').value && String(SchemaBridgeState.migration.catalogSelection[prefix]?.id) !== $(prefix+'Catalog').value) throw new Error('Wait for the selected LCNC datasource to load.');
   const dialect = $(prefix + 'Dialect').value, databaseField = $(prefix + 'Database'), database = databaseField.value.trim();
   if (!database) {
     const message = `${prefix === 'source' ? 'Source' : 'Target'} ${dialect === 'POSTGRESQL' ? 'PostgreSQL database name' : 'Oracle service name'} is required.`;
@@ -128,31 +117,21 @@ function connection(prefix) {
   }
   databaseField.setCustomValidity('');
   for (const suffix of ['Host', 'Port', 'Username']) { const field = $(prefix + suffix); if (!field.checkValidity()) { field.reportValidity(); throw new Error(`Check the ${prefix} ${suffix.toLowerCase()} field.`); } }
-  return {dialect,host:$(prefix + 'Host').value.trim(),port:Number($(prefix + 'Port').value),database,username:$(prefix + 'Username').value,password:$(prefix + 'Password').value,...(catalogSelection[prefix]?{jdbcUrl:catalogSelection[prefix].connection.jdbcUrl}:{})};
+  return {dialect,host:$(prefix + 'Host').value.trim(),port:Number($(prefix + 'Port').value),database,username:$(prefix + 'Username').value,password:$(prefix + 'Password').value,...(SchemaBridgeState.migration.catalogSelection[prefix]?{jdbcUrl:SchemaBridgeState.migration.catalogSelection[prefix].connection.jdbcUrl}:{})};
 }
 function fillOptions(select, values) { select.replaceChildren(); for (const value of values) { const option = document.createElement('option'); option.value = option.textContent = value; select.append(option); } }
 async function loadTables() { $('columnOptions').replaceChildren();fillOptions($('sourceTables'),[]); try { const schema = $('sourceSchemaSelect').value; if (schema) fillOptions($('sourceTables'), await (await api('/tables', {connection:connection('source'),schema})).json()); renderTablePicker(); } catch(e) { renderTablePicker();error(e.message); } }
 function goToStep(step, scroll=true) {
-  if (step > maxStep || step < 1) return;
-  currentStep = step;
+  if (step > SchemaBridgeState.migration.maxStep || step < 1) return;
+  SchemaBridgeState.migration.currentStep = step;
   document.querySelectorAll('[data-step-page]').forEach(page => page.hidden = Number(page.dataset.stepPage) !== step);
   document.querySelectorAll('[data-step-nav]').forEach(button => {
     const number = Number(button.dataset.stepNav), active = number === step;
     button.classList.toggle('active', active); button.classList.toggle('complete', number < step);
-    button.disabled = number > maxStep;
+    button.disabled = number > SchemaBridgeState.migration.maxStep;
     if (active) button.setAttribute('aria-current','step'); else button.removeAttribute('aria-current');
   });
   if (scroll) window.scrollTo({top:0,behavior:'smooth'});
-}
-function invalidate() {
-  clearRevertReview();
-  requestVersion++; lastRequest=null; plan = null; maxStep=Math.min(maxStep,2);
-  if ($('reportSection')) $('reportSection').hidden = true;
-  if ($('outputActions')) $('outputActions').hidden = true;
-  if ($('reviewNext')) $('reviewNext').disabled = true;
-  if ($('reviewStatus')) $('reviewStatus').textContent = 'Analysis is required before continuing.';
-  if ($('configStatus')) $('configStatus').textContent = 'Settings changed. Analyse to refresh the compatibility report.';
-  if (currentStep > 2 && $('reviewPage')) goToStep(2);
 }
 function updateFlow() {
   $('sourceConnection').hidden = !usesDatabase(); $('tableSelection').hidden = !usesDatabase(); $('filesInput').hidden = usesDatabase(); $('targetConnection').hidden = !writesDatabase();
@@ -164,9 +143,9 @@ connectionForm('source'); connectionForm('target');
 document.querySelectorAll('input[name="flow"]').forEach(input => input.addEventListener('change', updateFlow));
 document.querySelectorAll('[data-step-nav]').forEach(button => button.addEventListener('click',()=>goToStep(Number(button.dataset.stepNav))));
 document.querySelectorAll('[data-back]').forEach(button => button.addEventListener('click',()=>goToStep(Number(button.dataset.back))));
-$('flowNext').addEventListener('click',()=>{maxStep=Math.max(maxStep,2);goToStep(2);});
-$('reviewNext').addEventListener('click',()=>{if(!plan)return;maxStep=Math.max(maxStep,4);goToStep(4);});
-$('startOver').addEventListener('click',()=>{plan=null;lastRequest=null;maxStep=1;$('reportSection').hidden=true;$('outputActions').hidden=true;$('preparationSection').hidden=true;$('jobSection').hidden=true;goToStep(1);});
+$('flowNext').addEventListener('click',()=>{SchemaBridgeState.migration.maxStep=Math.max(SchemaBridgeState.migration.maxStep,2);goToStep(2);});
+$('reviewNext').addEventListener('click',()=>{if(!SchemaBridgeState.migration.plan)return;SchemaBridgeState.migration.maxStep=Math.max(SchemaBridgeState.migration.maxStep,4);goToStep(4);});
+$('startOver').addEventListener('click',()=>{SchemaBridgeState.migration.plan=null;SchemaBridgeState.migration.lastRequest=null;SchemaBridgeState.migration.maxStep=1;$('reportSection').hidden=true;$('outputActions').hidden=true;$('preparationSection').hidden=true;$('jobSection').hidden=true;goToStep(1);});
 $('configuration').addEventListener('input', invalidate);
 for (const prefix of ['source','target']) $(prefix + 'Dialect').addEventListener('change', () => { if(prefix==='source')$('columnOptions').replaceChildren(); applyDialect(prefix); fillOptions($(prefix + 'SchemaSelect'), []); if(prefix === 'source') {fillOptions($('sourceTables'), []);$('columnOptions').replaceChildren();renderTablePicker();} else $('targetSchema').value = $('targetDialect').value === 'ORACLE' ? 'APP' : 'public'; });
 let uploadVersion = 0;
@@ -205,39 +184,39 @@ $('configuration').addEventListener('submit', async event => {
   try {
     if(usesDatabase()&&(!selectedSourceTables().length||selectedSourceTables().length>500))throw new Error('Select between 1 and 500 source tables before analysis.');
     const request = {options:transferOptions(),selections:usesDatabase()?tableSelections():{},metadataOnly:usesDatabase(),sourceDialect:$('sourceDialect').value,targetDialect:$('targetDialect').value,targetSchema:$('targetSchema').value.trim(),sql:usesDatabase()?null:$('sql').value,source:usesDatabase()?connection('source'):null,sourceSchema:usesDatabase()?$('sourceSchemaSelect').value:null,tables:usesDatabase()?Array.from($('sourceTables').selectedOptions).map(o=>o.value):[],includeData:$('includeData').checked,target:writesDatabase()?connection('target'):null};
-    lastRequest=request; const version=requestVersion; const result = await (await api('/plans', request)).json(); if(version!==requestVersion){await api('/plans/'+result.id,undefined,'DELETE');return;} plan=result; renderPlan(); $('preview').textContent = await (await api('/plans/' + plan.id + '/preview', undefined, 'GET')).text(); $('configStatus').textContent = 'Analysis complete. Review the proposed changes.'; maxStep=Math.max(maxStep,3);goToStep(3);
+    SchemaBridgeState.migration.lastRequest=request; const version=SchemaBridgeState.migration.requestVersion; const result = await (await api('/plans', request)).json(); if(version!==SchemaBridgeState.migration.requestVersion){await api('/plans/'+result.id,undefined,'DELETE');return;} SchemaBridgeState.migration.plan=result; renderPlan(); $('preview').textContent = await (await api('/plans/' + SchemaBridgeState.migration.plan.id + '/preview', undefined, 'GET')).text(); $('configStatus').textContent = 'Analysis complete. Review the proposed changes.'; SchemaBridgeState.migration.maxStep=Math.max(SchemaBridgeState.migration.maxStep,3);goToStep(3);
   } catch(e) { error(e.message); $('configStatus').textContent = 'Analysis failed. Check the message and try again.'; } finally { $('analyse').disabled = false; }
 });
 function cell(row,text) { const td = document.createElement('td'); td.textContent = text; row.append(td); return td; }
 function renderPlan() {
   $('reportSection').hidden = false; $('reportMessages').replaceChildren(); $('reportRows').replaceChildren();
-  $('outputActions').hidden = false; $('reviewNext').disabled = false; $('reviewStatus').textContent = 'Review complete. Continue when you are ready to export or run the plan.';
-  $('outputTitle').textContent = plan.orderedScript ? 'Download converted script' : 'Ready to export or execute';
-  $('outputDescription').textContent = plan.orderedScript ? 'This script preserves statement order and is provided as a review package.' : 'Choose an export or run the reviewed plan against the target database.';
-  $('reportTitle').textContent = plan.orderedScript ? 'Review the script in execution order' : 'Review every table';
-  $('matchAll').hidden = !!plan.orderedScript; $('tableReport').hidden = !!plan.orderedScript;
-  $('statementSection').hidden = !plan.orderedScript; $('statementRows').replaceChildren();
-  $('previewTitle').textContent = plan.orderedScript ? 'Preview full converted script in original order' : 'Preview converted table definitions';
-  $('download').textContent = plan.orderedScript ? 'Download ordered review draft' : 'Download SQL package';
-  $('executionNote').textContent = plan.orderedScript ? 'This lifecycle script includes operations whose order matters. Download preserves all converted statements and marks source errors in place. Per-table actions and automatic execution are disabled; no target changes are made.' : 'Run selected plan writes to the inspected target database. DDL and previously committed tables can remain after failure. Prepared plans are retained for 30 days. Job history remains until deleted.';
-  if (plan.orderedScript) {
-    const statements = plan.statements || [], errors = statements.filter(s => ['ERROR','UNSUPPORTED'].includes(s.status)).length;
+  $('outputActions').hidden = false; $('reviewNext').disabled = false; $('reviewStatus').textContent = 'Review complete. Continue when you are ready to export or run the SchemaBridgeState.migration.plan.';
+  $('outputTitle').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Download converted script' : 'Ready to export or execute';
+  $('outputDescription').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'This script preserves statement order and is provided as a review package.' : 'Choose an export or run the reviewed SchemaBridgeState.migration.plan against the target database.';
+  $('reportTitle').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Review the script in execution order' : 'Review every table';
+  $('matchAll').hidden = !!SchemaBridgeState.migration.plan.orderedScript; $('tableReport').hidden = !!SchemaBridgeState.migration.plan.orderedScript;
+  $('statementSection').hidden = !SchemaBridgeState.migration.plan.orderedScript; $('statementRows').replaceChildren();
+  $('previewTitle').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Preview full converted script in original order' : 'Preview converted table definitions';
+  $('download').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'Download ordered review draft' : 'Download SQL package';
+  $('executionNote').textContent = SchemaBridgeState.migration.plan.orderedScript ? 'This lifecycle script includes operations whose order matters. Download preserves all converted statements and marks source errors in place. Per-table actions and automatic execution are disabled; no target changes are made.' : 'Run selected SchemaBridgeState.migration.plan writes to the inspected target database. DDL and previously committed tables can remain after failure. Prepared plans are retained for 30 days. Job history remains until deleted.';
+  if (SchemaBridgeState.migration.plan.orderedScript) {
+    const statements = SchemaBridgeState.migration.plan.statements || [], errors = statements.filter(s => ['ERROR','UNSUPPORTED'].includes(s.status)).length;
     $('statementSummary').textContent = `${statements.length} statements · ${statements.length - errors} converted (including review warnings) · ${errors} errors / unsupported statements. No statements are silently omitted.`;
     for (const statement of statements) { const row = document.createElement('tr'); cell(row, statement.number); cell(row, statement.kind); cell(row, statement.status); cell(row, statement.messages.join(' · ') || 'Converted. See the full preview below.'); $('statementRows').append(row); }
   }
-  for (const [messages, kind] of [[plan.issues,'issue'],[plan.warnings,'warning']]) for (const text of messages) { const p = document.createElement('p'); p.className = 'message ' + kind; p.textContent = text; $('reportMessages').append(p); }
-  const maxRows = plan.options && plan.options.maxRows;
-  if (maxRows && !plan.orderedScript) {
-    const totalRows = plan.tables.reduce((sum,t) => sum + (t.rows||0), 0);
-    const hasUnextracted = plan.tables.some(t => (t.rows||0)===0 && t.estimatedRows!=null);
-    $('quotaSummary').textContent = plan.prepared===false
-      ? `Row budget: ${maxRows.toLocaleString()} total across this plan. Per-table counts are not yet extracted.`
+  for (const [messages, kind] of [[SchemaBridgeState.migration.plan.issues,'issue'],[SchemaBridgeState.migration.plan.warnings,'warning']]) for (const text of messages) { const p = document.createElement('p'); p.className = 'message ' + kind; p.textContent = text; $('reportMessages').append(p); }
+  const maxRows = SchemaBridgeState.migration.plan.options && SchemaBridgeState.migration.plan.options.maxRows;
+  if (maxRows && !SchemaBridgeState.migration.plan.orderedScript) {
+    const totalRows = SchemaBridgeState.migration.plan.tables.reduce((sum,t) => sum + (t.rows||0), 0);
+    const hasUnextracted = SchemaBridgeState.migration.plan.tables.some(t => (t.rows||0)===0 && t.estimatedRows!=null);
+    $('quotaSummary').textContent = SchemaBridgeState.migration.plan.prepared===false
+      ? `Row budget: ${maxRows.toLocaleString()} total across this SchemaBridgeState.migration.plan. Per-table counts are not yet extracted.`
       : `Row budget used: ${totalRows.toLocaleString()} / ${maxRows.toLocaleString()} (${((totalRows/maxRows)*100).toFixed(1)}%)${hasUnextracted?' — some tables show an estimate only':''}.`;
   } else $('quotaSummary').textContent = '';
   const findingKindLabel = {MISSING_TARGET_COLUMN:'Missing column',EXTRA_TARGET_COLUMN:'Extra column',TYPE_MISMATCH:'Type mismatch',NULLABILITY_MISMATCH:'Nullability',IDENTITY_MISMATCH:'Identity',DEFAULT_MISMATCH:'Default value',KEY_OR_INDEX_MISMATCH:'Keys/indexes',ORACLE_IDENTITY_DML_BLOCKED:'Identity + DML only'};
-  for (const table of plan.tables) {
+  for (const table of SchemaBridgeState.migration.plan.tables) {
     const tr = document.createElement('tr'); cell(tr,table.table); const status = cell(tr,''); const badge = document.createElement('span'); badge.className = 'badge ' + table.status; badge.textContent = ({NEW:'New table',MATCH:'Already exists · match',MISMATCH:'Already exists / review',UNCHECKED:'Not inspected'})[table.status]; status.append(badge);
-    const rowSummary=plan.prepared===false?(table.estimatedRows==null?'Not extracted; estimate unavailable':`~${table.estimatedRows.toLocaleString()} estimated (not extracted)`):`${table.rows.toLocaleString()} extracted`;
+    const rowSummary=SchemaBridgeState.migration.plan.prepared===false?(table.estimatedRows==null?'Not extracted; estimate unavailable':`~${table.estimatedRows.toLocaleString()} estimated (not extracted)`):`${table.rows.toLocaleString()} extracted`;
     const rowCell = cell(tr, rowSummary);
     if (maxRows && table.rows) { const share = document.createElement('div'); share.className='muted'; share.textContent = `${((table.rows/maxRows)*100).toFixed(2)}% of budget`; rowCell.append(share); }
     const findings = cell(tr, ''); findings.textContent = '';
@@ -261,25 +240,24 @@ function renderPlan() {
     for(const action of table.allowedActions) { const option = document.createElement('option'); option.value = action; option.textContent = ({CREATE_AND_LOAD:'Create + load',DML_ONLY:'DML only',SKIP:'Skip table'})[action]; select.append(option); }
     select.value = table.status === 'MATCH' || table.status === 'MISMATCH' ? 'SKIP' : 'CREATE_AND_LOAD'; td.append(select); $('reportRows').append(tr);
   }
-  $('execute').hidden = !plan.targetChecked || plan.orderedScript; $('execute').disabled = plan.issues.length > 0 || plan.orderedScript || plan.prepared===false; $('download').disabled = plan.prepared===false; $('prepareData').hidden=plan.prepared!==false;
+  $('execute').hidden = !SchemaBridgeState.migration.plan.targetChecked || SchemaBridgeState.migration.plan.orderedScript; $('execute').disabled = SchemaBridgeState.migration.plan.issues.length > 0 || SchemaBridgeState.migration.plan.orderedScript || SchemaBridgeState.migration.plan.prepared===false; $('download').disabled = SchemaBridgeState.migration.plan.prepared===false; $('prepareData').hidden=SchemaBridgeState.migration.plan.prepared!==false;
 }
-function actions() { return plan?.orderedScript ? {} : Object.fromEntries(Array.from($('reportRows').querySelectorAll('select')).map(select => [select.dataset.table,select.value])); }
+function actions() { return SchemaBridgeState.migration.plan?.orderedScript ? {} : Object.fromEntries(Array.from($('reportRows').querySelectorAll('select')).map(select => [select.dataset.table,select.value])); }
 $('matchAll').addEventListener('click', () => $('reportRows').querySelectorAll('select').forEach(select => { if (Array.from(select.options).some(o=>o.value==='DML_ONLY')) select.value='DML_ONLY'; }));
 function clearDownloadLink(){const panel=$('downloadHelp'),link=$('downloadLink');panel.hidden=true;link.hidden=true;link.removeAttribute('href');$('downloadStatus').textContent='';}
 $('reportRows').addEventListener('change',event=>{if(event.target.matches('select[data-table]'))clearDownloadLink();});
 $('matchAll').addEventListener('click',clearDownloadLink);
-function save(blob,name) { const url=URL.createObjectURL(blob), link=document.createElement('a'); link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000); }
-$('reportDownload').addEventListener('click',()=>save(new Blob([JSON.stringify({report:plan,actions:actions()},null,2)],{type:'application/json'}),'compatibility-report.json'));
+$('reportDownload').addEventListener('click',()=>save(new Blob([JSON.stringify({report:SchemaBridgeState.migration.plan,actions:actions()},null,2)],{type:'application/json'}),'compatibility-report.json'));
 $('download').addEventListener('click',async()=>{try{
   $('download').disabled=true;clearDownloadLink();$('downloadStatus').textContent='Creating a secure, short-lived download link…';$('downloadHelp').hidden=false;
-  const ticket=await(await api('/plans/'+plan.id+'/download-ticket',actions())).json();
-  const link=$('downloadLink');link.href=ticket.url;link.textContent=plan.orderedScript?'Save review package':'Save migration ZIP';link.hidden=false;$('downloadStatus').textContent='Download link ready. It expires in two minutes; click the link to save the ZIP.';
+  const ticket=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/download-ticket',actions())).json();
+  const link=$('downloadLink');link.href=ticket.url;link.textContent=SchemaBridgeState.migration.plan.orderedScript?'Save review package':'Save migration ZIP';link.hidden=false;$('downloadStatus').textContent='Download link ready. It expires in two minutes; click the link to save the ZIP.';
 }catch(e){clearDownloadLink();error(e.message);}finally{$('download').disabled=false;}});
 $('downloadLink').addEventListener('click',()=>{setTimeout(()=>{clearDownloadLink();$('downloadStatus').textContent='Download requested. If it did not start, prepare a fresh link.';$('downloadHelp').hidden=false;},0);});
-$('execute').addEventListener('click',async()=>{ try { $('execute').disabled=true; finalJob=await(await api('/plans/'+plan.id+'/execute',{target:connection('target'),actions:actions()})).json(); $('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);$('execute').disabled=false;} });
+$('execute').addEventListener('click',async()=>{ try { $('execute').disabled=true; SchemaBridgeState.migration.finalJob=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/execute',{target:connection('target'),actions:actions()})).json(); $('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);$('execute').disabled=false;} });
 const validationMethodLabel={FINGERPRINT:'Fingerprint (count + SHA-256)',ROW_COUNT:'Row count only',NONE:'No validation'};
-function renderJob(){ renderProgress('job',finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);$('resumeJob').hidden=!finalJob.resumable; $('jobState').textContent=finalJob.state+' — '+finalJob.message; $('jobRows').replaceChildren();
-  for(const table of finalJob.tables){
+function renderJob(){ renderProgress('job',SchemaBridgeState.migration.finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(SchemaBridgeState.migration.finalJob.state);$('resumeJob').hidden=!SchemaBridgeState.migration.finalJob.resumable; $('jobState').textContent=SchemaBridgeState.migration.finalJob.state+' — '+SchemaBridgeState.migration.finalJob.message; $('jobRows').replaceChildren();
+  for(const table of SchemaBridgeState.migration.finalJob.tables){
     const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows].forEach(value=>cell(tr,value));
     const details=cell(tr,'');
     const v=table.validation;
@@ -292,26 +270,24 @@ function renderJob(){ renderProgress('job',finalJob.progress);$('cancelJob').hid
     $('jobRows').append(tr);
   }
   renderRevert(); }
-async function pollJob(){ clearTimeout(polling); try{finalJob=await(await api('/jobs/'+finalJob.id,undefined,'GET')).json();renderJob();if(jobBusy(finalJob))polling=setTimeout(pollJob,1500);else refreshHistory();}catch(e){error(e.message);polling=setTimeout(pollJob,5000);} }
-$('jobDownload').addEventListener('click',()=>save(new Blob([JSON.stringify(finalJob,null,2)],{type:'application/json'}),'execution-report.json'));
+async function pollJob(){ clearTimeout(SchemaBridgeState.migration.polling); try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id,undefined,'GET')).json();renderJob();if(jobBusy(SchemaBridgeState.migration.finalJob))SchemaBridgeState.migration.polling=setTimeout(pollJob,1500);else refreshHistory();}catch(e){error(e.message);SchemaBridgeState.migration.polling=setTimeout(pollJob,5000);} }
+$('jobDownload').addEventListener('click',()=>save(new Blob([JSON.stringify(SchemaBridgeState.migration.finalJob,null,2)],{type:'application/json'}),'execution-report.json'));
 function transferOptions(){return {maxRows:Number($('maxRows').value),maxTableBytes:Math.round(Number($('maxTableGb').value)*1e9),diskReserveBytes:Math.round(Number($('diskReserveMb').value)*1e6),fetchSize:Number($('fetchSize').value),batchRows:Number($('batchRows').value),batchBytes:Math.round(Number($('batchMb').value)*1e6),queryTimeoutSeconds:Number($('queryTimeout').value),readTimeoutSeconds:Number($('readTimeout').value),validateData:$('validateData').checked,useCopy:$('useCopy').checked};}
 function renderProgress(prefix,p){if(!p)return;const phases={QUEUED:'Queued',PREPARING:'Preparing',EXTRACTING:'Reading source',CHECKING:'Checking target and staged data',CREATING:'Creating tables',LOADING:'Loading data',FINALIZING:'Adding indexes and constraints',SUCCEEDED:'Complete',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'};$(`${prefix}Phase`).textContent=phases[p.phase]||p.phase||'Waiting';$(`${prefix}Table`).textContent=p.table?`Table: ${p.table}`:'';$(`${prefix}Read`).textContent=Number(p.rowsRead||0).toLocaleString();$(`${prefix}Sent`).textContent=prefix==='preparation'?'—':Number(p.rowsSent||0).toLocaleString();$(`${prefix}Committed`).textContent=prefix==='preparation'?'—':Number(p.rowsCommitted||0).toLocaleString();$(`${prefix}Bytes`).textContent=formatBytes(p.bytes);$(`${prefix}Elapsed`).textContent=formatDuration(p.elapsedSeconds);$(`${prefix}Rate`).textContent=Number(p.rowsPerSecond)>0?`${Math.round(p.rowsPerSecond).toLocaleString()} rows/s`:'—';$(`${prefix}Eta`).textContent=p.remainingSeconds==null?'—':formatDuration(p.remainingSeconds);}
-function formatBytes(value){let size=Number(value||0),unit='B';for(const next of ['KB','MB','GB','TB']){if(size<1000)break;size/=1000;unit=next;}return `${size<10&&unit!=='B'?size.toFixed(1):Math.round(size).toLocaleString()} ${unit}`;}
-function formatDuration(value){let seconds=Math.max(0,Math.floor(Number(value)||0));if(seconds<60)return `${seconds}s`;const units=[['d',86400],['h',3600],['m',60]];const parts=[];for(const [label,size] of units){if(seconds>=size){const amount=Math.floor(seconds/size);parts.push(`${amount}${label}`);seconds%=size;if(parts.length===2)break;}}if(parts.length<2&&seconds)parts.push(`${seconds}s`);return parts.join(' ');}
-$('prepareData').addEventListener('click',async()=>{if(!lastRequest)return;try{
-  const version=requestVersion;const previousPlan=plan.id;const request={...lastRequest,metadataOnly:false};
-  const started=await(await api('/preparations',request)).json();preparationId=started.id;$('preparationSection').hidden=false;$('cancelPreparation').hidden=false;$('prepareData').disabled=true;
+$('prepareData').addEventListener('click',async()=>{if(!SchemaBridgeState.migration.lastRequest)return;try{
+  const version=SchemaBridgeState.migration.requestVersion;const previousPlan=SchemaBridgeState.migration.plan.id;const request={...SchemaBridgeState.migration.lastRequest,metadataOnly:false};
+  const started=await(await api('/preparations',request)).json();SchemaBridgeState.migration.preparationId=started.id;$('preparationSection').hidden=false;$('cancelPreparation').hidden=false;$('prepareData').disabled=true;
   async function poll(){try{const current=await(await api('/preparations/'+started.id,undefined,'GET')).json();$('preparationState').textContent=current.message;renderProgress('preparation',current.progress);
-    if(['QUEUED','PREPARING'].includes(current.state)){preparationPoll=setTimeout(poll,1000);return;}
-    $('cancelPreparation').hidden=true;$('prepareData').disabled=false;if(current.state==='READY'&&version===requestVersion){plan=current.plan;renderPlan();$('preview').textContent=await(await api('/plans/'+plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
-    if(current.state==='READY'&&version!==requestVersion)await api('/plans/'+current.plan.id,undefined,'DELETE');
+    if(['QUEUED','PREPARING'].includes(current.state)){SchemaBridgeState.migration.preparationPoll=setTimeout(poll,1000);return;}
+    $('cancelPreparation').hidden=true;$('prepareData').disabled=false;if(current.state==='READY'&&version===SchemaBridgeState.migration.requestVersion){SchemaBridgeState.migration.plan=current.SchemaBridgeState.migration.plan;renderPlan();$('preview').textContent=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
+    if(current.state==='READY'&&version!==SchemaBridgeState.migration.requestVersion)await api('/plans/'+current.SchemaBridgeState.migration.plan.id,undefined,'DELETE');
     if(current.state==='FAILED')error(current.message);
   }catch(e){$('prepareData').disabled=false;error(e.message);}}
   await poll();
 }catch(e){error(e.message);$('prepareData').disabled=false;}});
-$('cancelPreparation').addEventListener('click',async()=>{try{if(preparationId)await api('/preparations/'+preparationId+'/cancel',{});}catch(e){error(e.message);}});
-$('cancelJob').addEventListener('click',async()=>{try{finalJob=await(await api('/jobs/'+finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
-$('resumeJob').addEventListener('click',async()=>{try{finalJob=await(await api('/jobs/'+finalJob.id+'/resume',connection('target'))).json();renderJob();pollJob();}catch(e){error(e.message);}});
+$('cancelPreparation').addEventListener('click',async()=>{try{if(SchemaBridgeState.migration.preparationId)await api('/preparations/'+SchemaBridgeState.migration.preparationId+'/cancel',{});}catch(e){error(e.message);}});
+$('cancelJob').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
+$('resumeJob').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/resume',connection('target'))).json();renderJob();pollJob();}catch(e){error(e.message);}});
 function jobStateLabel(state){return ({QUEUED:'Queued',RUNNING:'Running',SUCCEEDED:'Completed',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'})[state]||state;}
 function jobHistoryCard(job){
   const card=document.createElement('article');card.className='history-card';card.setAttribute('role','listitem');
@@ -322,7 +298,7 @@ function jobHistoryCard(job){
   const summary=document.createElement('p');const committed=Number(job.progress?.rowsCommitted||0);summary.className='history-summary';summary.textContent=`${job.tables.length} table${job.tables.length===1?'':'s'} · ${committed.toLocaleString()} ${job.state==='RECOVERY_REQUIRED'?'rows recorded committed':'rows committed'}`;card.append(summary);
   const detail=document.createElement('p');detail.className='history-detail';detail.textContent=job.revert?.message||job.message;card.append(detail);
   const actions=document.createElement('div');actions.className='history-actions';
-  const view=document.createElement('button');view.className='secondary';view.textContent='View report / revert';view.addEventListener('click',async()=>{try{clearTimeout(polling);clearRevertReview();finalJob=await(await api('/jobs/'+job.id,undefined,'GET')).json();$('jobSection').hidden=false;renderJob();plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(jobBusy(finalJob))pollJob();maxStep=4;goToStep(4);}catch(e){error(e.message);}});actions.append(view);
+  const view=document.createElement('button');view.className='secondary';view.textContent='View report / revert';view.addEventListener('click',async()=>{try{clearTimeout(SchemaBridgeState.migration.polling);clearRevertReview();SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+job.id,undefined,'GET')).json();$('jobSection').hidden=false;renderJob();SchemaBridgeState.migration.plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(jobBusy(SchemaBridgeState.migration.finalJob))pollJob();SchemaBridgeState.migration.maxStep=4;goToStep(4);}catch(e){error(e.message);}});actions.append(view);
   if(!jobBusy(job)){
     const uncertain=job.state==='RECOVERY_REQUIRED'||['PARTIAL','RECOVERY_REQUIRED'].includes(job.revert?.state);
     const remove=document.createElement('button');remove.className=uncertain?'secondary danger':'secondary';remove.textContent=uncertain?'Review and discard evidence':'Delete saved files';
@@ -332,7 +308,7 @@ function jobHistoryCard(job){
         :'Delete this saved migration and its exported data? Target database rows will remain.';
       if(!window.confirm(prompt))return;
       remove.disabled=true;
-      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');if(finalJob?.id===job.id){clearTimeout(polling);$('jobSection').hidden=true;$('revertSection').hidden=true;clearRevertReview();}if(plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
+      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');if(SchemaBridgeState.migration.finalJob?.id===job.id){clearTimeout(SchemaBridgeState.migration.polling);$('jobSection').hidden=true;$('revertSection').hidden=true;clearRevertReview();}if(SchemaBridgeState.migration.plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
     });
     actions.append(remove);
   }
@@ -356,7 +332,7 @@ async function refreshStorage(){
       const div=document.createElement('div');const dt=document.createElement('dt');dt.textContent=label;const dd=document.createElement('dd');dd.textContent=value;div.append(dt,dd);metrics.append(div);
     }
     const orphans=$('storageOrphans');
-    if(s.orphanedDirectories.length){orphans.hidden=false;orphans.textContent=`${s.orphanedDirectories.length} orphaned work-directory folder${s.orphanedDirectories.length===1?'':'s'} found with no matching saved plan (left over from an interrupted run). Review and remove manually if no longer needed.`;}
+    if(s.orphanedDirectories.length){orphans.hidden=false;orphans.textContent=`${s.orphanedDirectories.length} orphaned work-directory folder${s.orphanedDirectories.length===1?'':'s'} found with no matching saved SchemaBridgeState.migration.plan (left over from an interrupted run). Review and remove manually if no longer needed.`;}
     else orphans.hidden=true;
   }catch(e){error(e.message);}
   finally{button.disabled=false;}
