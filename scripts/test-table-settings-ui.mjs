@@ -10,8 +10,13 @@ window.fetch=async(path,options)=>{requests.push(path);return {ok:true,json:asyn
 const el=id=>window.document.getElementById(id);
 const change=node=>node.dispatchEvent(new window.Event('change',{bubbles:true}));
 const settle=()=>new Promise(resolve=>setTimeout(resolve,25));
+const lastError=()=>Array.from(window.document.querySelectorAll('[data-toast-type="error"]')).at(-1)?.textContent||'';
 try{
-  window.eval(await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8')+'\nwindow.readSelections=tableSelections;');
+  const JS_FILES=['format','api','toast','state'];
+  let combined='';
+  for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
+  combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8')+'\nwindow.readSelections=tableSelections;';
+  window.eval(combined);
   await settle();
   assert.ok(window.document.querySelector('header .steps'));
   assert.equal(window.document.querySelector('.intro'),null);
@@ -49,6 +54,6 @@ try{
   el('sourceTables').options[0].selected=true;change(el('sourceTables'));
   assert.equal(window.readSelections().table_0.filters[0].value,'false');
   el('sourceTables').add(new window.Option('extra','extra',true,true));change(el('sourceTables'));
-  el('applyTablePicker').click();assert.match(el('error').textContent,/500 source tables/);
+  el('applyTablePicker').click();assert.match(lastError(),/500 source tables/);
   console.log('Table settings UI passed: lazy loading, 500 selections, multiple typed filters, null checks, removal, limits, retained settings and 501 rejection.');
 }finally{window.close();}

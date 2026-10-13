@@ -17,7 +17,11 @@ window.fetch=async(path,options)=>{
 const el=id=>window.document.getElementById(id),change=element=>element.dispatchEvent(new window.Event('change',{bubbles:true}));
 const settle=async()=>{await new Promise(setImmediate);await new Promise(setImmediate);};
 try {
-  window.eval(await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8'));await settle();
+  const JS_FILES=['format','api','toast','state'];
+  let combined='';
+  for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
+  combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8');
+  window.eval(combined);await settle();
   const mode=window.document.querySelector('input[value="db-db"]');mode.checked=true;change(mode);
   el('sourceCatalogRefresh').click();await settle();
   assert.equal(requests.filter(r=>r.path==='/api/datasources').length,1);

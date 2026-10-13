@@ -5,7 +5,7 @@ import {createRequire} from 'node:module';
 const require=createRequire(new URL('../target/ui-test/package.json',import.meta.url));
 const {JSDOM}=require('jsdom');
 const html=await readFile(new URL('../src/main/resources/static/index.html',import.meta.url),'utf8');
-const app=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8');
+const JS_FILES=['format','api','toast','state'];
 const dom=new JSDOM(html,{url:'http://localhost:8098',runScripts:'outside-only'});
 const {window}=dom, requests=[];
 window.fetch=async(path,options)=>{
@@ -16,8 +16,13 @@ const el=id=>window.document.getElementById(id);
 const change=field=>field.dispatchEvent(new window.Event('change',{bubbles:true}));
 const input=field=>field.dispatchEvent(new window.Event('input',{bubbles:true}));
 const settle=async()=>{await new Promise(setImmediate);await new Promise(setImmediate);};
+const lastError=()=>Array.from(window.document.querySelectorAll('[data-toast-type="error"]')).at(-1)?.textContent||'';
 try {
-  window.eval(app);await settle();
+  let combined='';
+  for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
+  combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8');
+  window.eval(combined);
+  await settle();
   assert.equal(el('targetDatabase').value,'postgres');
   assert.equal(el('sourceDatabase').disabled,true);
   assert.equal(el('configuration').checkValidity(),true,'Hidden connection fields must not block SQL-only workflows');
@@ -33,7 +38,7 @@ try {
   const sent=requests.length;
   el('sourceDatabase').value='   ';input(el('sourceDatabase'));el('sourceConnect').click();await settle();
   assert.equal(requests.length,sent,'Blank database names must never be posted');
-  assert.match(el('error').textContent,/Source PostgreSQL database name is required/);
+  assert.match(lastError(),/Source PostgreSQL database name is required/);
   el('sourceDatabase').value='finance';input(el('sourceDatabase'));
   el('sourceDialect').value='ORACLE';change(el('sourceDialect'));
   assert.equal(el('sourceDatabase').value,'');assert.equal(el('sourceDatabaseLabel').textContent,'Oracle service name');

@@ -8,8 +8,13 @@ const dom=new JSDOM(await readFile(new URL('../src/main/resources/static/index.h
 const {window}=dom;
 window.TextEncoder=TextEncoder;
 window.fetch=async()=>({ok:true,json:async()=>({dialects:['ORACLE','POSTGRESQL'],executionPolicy:'INSERT_ONLY'})});
-window.eval(await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8') + '\nwindow.loadSqlFiles = loadSqlFiles;');
+const JS_FILES=['format','api','toast','state'];
+let combinedScript='';
+for (const file of JS_FILES) combinedScript+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
+combinedScript+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8') + '\nwindow.loadSqlFiles = loadSqlFiles;';
+window.eval(combinedScript);
 const el=id=>window.document.getElementById(id);
+const lastError=()=>Array.from(window.document.querySelectorAll('[data-toast-type="error"]')).at(-1)?.textContent||'';
 const file=(name,text,path=name)=>({name,webkitRelativePath:path,size:Buffer.byteLength(text),text:async()=>text});
 const load=async(files,id='folder')=>{Object.defineProperty(el(id),'files',{value:files,configurable:true});await window.loadSqlFiles(el(id));};
 try {
@@ -25,8 +30,8 @@ try {
   try { assert.equal(plan.tables.length,10);assert.equal(plan.issues.length,0);assert.ok(plan.tables.every(t=>t.rows===1)); }
   finally { await fetch(`${base}/api/plans/${plan.id}`,{method:'DELETE',headers:{'X-Migration-Client':'migration-ui'}}); }
   await load([{...file('huge.sql',''),size:10000001}]);
-  assert.equal(el('sql').value,'');assert.match(el('error').textContent,/10 MB/);
-  await load([file('image.png','ignored')]);assert.match(el('error').textContent,/No .sql/);
+  assert.equal(el('sql').value,'');assert.match(lastError(),/10 MB/);
+  await load([file('image.png','ignored')]);assert.match(lastError(),/No .sql/);
   await load([file('one.SQL','\uFEFFCREATE TABLE one (id NUMBER(5));','nested/one.SQL')]);
   assert.match(el('sql').value,/Source file: nested\/one.SQL/);assert.ok(!el('sql').value.includes('\uFEFF'));
   let finishOld;
