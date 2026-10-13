@@ -1,39 +1,5 @@
 'use strict';
 const $ = id => document.getElementById(id);
-function revertBusy(job){return !!job?.revert && ['QUEUED','RUNNING'].includes(job.revert.state);}
-function jobBusy(job){return ['QUEUED','RUNNING'].includes(job.state)||revertBusy(job);}
-function clearRevertReview(){SchemaBridgeState.migration.pendingRevert=null;$('revertReview').hidden=true;$('acknowledgeRevert').checked=false;$('confirmRevert').disabled=true;}
-function renderRevert(){
-  const r=SchemaBridgeState.migration.finalJob?.revert;
-  $('revertSection').hidden=!SchemaBridgeState.migration.finalJob||(SchemaBridgeState.migration.finalJob.state!=='SUCCEEDED'&&!r);
-  if(SchemaBridgeState.migration.pendingRevert&&(SchemaBridgeState.migration.pendingRevert.jobId!==SchemaBridgeState.migration.finalJob?.id||revertBusy(SchemaBridgeState.migration.finalJob)))clearRevertReview();
-  const canReview=SchemaBridgeState.migration.finalJob?.state==='SUCCEEDED'&&(!r||['FAILED','PARTIAL'].includes(r.state));
-  $('reviewRevert').hidden=!canReview;$('reviewRevert').disabled=false;$('cancelRevert').hidden=!revertBusy(SchemaBridgeState.migration.finalJob);
-  $('revertState').textContent=r?`${r.state}: ${r.message} ${r.progress.rowsCommitted.toLocaleString()} rows removed by committed revert work.`:'Select Review revert to check this job against the target before removing anything.';
-  $('revertResults').replaceChildren();
-  for(const table of r?.tables||[]){const item=document.createElement('li');item.textContent=`${table.table}: ${table.status} · ${table.rows.toLocaleString()} original rows · ${table.action==='DROP_TABLE'?'drop migration-created table':'remove transferred rows'}`;$('revertResults').append(item);}
-}
-$('reviewRevert').addEventListener('click',async()=>{
-  const id=SchemaBridgeState.migration.finalJob.id;clearRevertReview();$('reviewRevert').disabled=true;$('revertState').textContent='Checking target data and dependencies…';
-  try{
-    const review=await(await api('/jobs/'+id+'/revert-preview',connection('target'))).json();
-    if(SchemaBridgeState.migration.finalJob?.id!==id)return;SchemaBridgeState.migration.pendingRevert=review;
-    $('revertTarget').textContent=`Job ${review.jobId} · Target: ${review.target}`;
-    $('revertExpiry').textContent='Review expires at '+new Date(review.expiresAt).toLocaleTimeString()+'. The target is checked again when you confirm.';
-    $('revertTables').replaceChildren();
-    for(const table of review.tables){const item=document.createElement('li');item.textContent=`${table.table}: ${table.action==='DROP_TABLE'?'remove transferred rows and drop table':'remove only transferred rows'} · ${table.rows.toLocaleString()} original rows · ${table.status}`;$('revertTables').append(item);}
-    $('revertReview').hidden=false;$('revertState').textContent='Review the removal below. Nothing has been removed.';$('revertReview').scrollIntoView({behavior:'smooth',block:'center'});
-  }catch(e){$('revertState').textContent=e.message;error(e.message);}finally{$('reviewRevert').disabled=false;}
-});
-$('acknowledgeRevert').addEventListener('change',()=>{$('confirmRevert').disabled=!SchemaBridgeState.migration.pendingRevert||!$('acknowledgeRevert').checked;});
-$('dismissRevert').addEventListener('click',()=>{clearRevertReview();renderRevert();});
-$('confirmRevert').addEventListener('click',async()=>{
-  if(!SchemaBridgeState.migration.pendingRevert||!$('acknowledgeRevert').checked||SchemaBridgeState.migration.pendingRevert.jobId!==SchemaBridgeState.migration.finalJob.id)return;
-  const review=SchemaBridgeState.migration.pendingRevert;$('confirmRevert').disabled=true;
-  try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+review.jobId+'/revert',{target:connection('target'),token:review.token})).json();clearRevertReview();renderJob();pollJob();}
-  catch(e){clearRevertReview();$('revertState').textContent=e.message;error(e.message);}
-});
-$('cancelRevert').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
 connectionForm('source'); connectionForm('target');
 document.querySelectorAll('input[name="flow"]').forEach(input => input.addEventListener('change', updateFlow));
 document.querySelectorAll('[data-step-nav]').forEach(button => button.addEventListener('click',()=>goToStep(Number(button.dataset.stepNav))));
@@ -53,38 +19,7 @@ $('configuration').addEventListener('submit', async event => {
     SchemaBridgeState.migration.lastRequest=request; const version=SchemaBridgeState.migration.requestVersion; const result = await (await api('/plans', request)).json(); if(version!==SchemaBridgeState.migration.requestVersion){await api('/plans/'+result.id,undefined,'DELETE');return;} SchemaBridgeState.migration.plan=result; renderPlan(); $('preview').textContent = await (await api('/plans/' + SchemaBridgeState.migration.plan.id + '/preview', undefined, 'GET')).text(); $('configStatus').textContent = 'Analysis complete. Review the proposed changes.'; SchemaBridgeState.migration.maxStep=Math.max(SchemaBridgeState.migration.maxStep,3);goToStep(3);
   } catch(e) { error(e.message); $('configStatus').textContent = 'Analysis failed. Check the message and try again.'; } finally { $('analyse').disabled = false; }
 });
-const validationMethodLabel={FINGERPRINT:'Fingerprint (count + SHA-256)',ROW_COUNT:'Row count only',NONE:'No validation'};
-function renderJob(){ renderProgress('job',SchemaBridgeState.migration.finalJob.progress);$('cancelJob').hidden=!['RUNNING','QUEUED'].includes(SchemaBridgeState.migration.finalJob.state);$('resumeJob').hidden=!SchemaBridgeState.migration.finalJob.resumable; $('jobState').textContent=SchemaBridgeState.migration.finalJob.state+' — '+SchemaBridgeState.migration.finalJob.message; $('jobRows').replaceChildren();
-  for(const table of SchemaBridgeState.migration.finalJob.tables){
-    const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows].forEach(value=>cell(tr,value));
-    const details=cell(tr,'');
-    const v=table.validation;
-    if(v){
-      const summary=document.createElement('div');
-      const scope=v.method==='NONE'?(v.skippedReason||''):`${validationMethodLabel[v.method]||v.method} · ${v.rowsChecked.toLocaleString()} rows checked · ${v.durationSeconds.toFixed(2)}s`;
-      summary.textContent=scope; details.append(summary);
-    }
-    const message=document.createElement('div'); message.className='muted'; message.textContent=table.message; details.append(message);
-    $('jobRows').append(tr);
-  }
-  renderRevert(); }
-async function pollJob(){ clearTimeout(SchemaBridgeState.migration.polling); try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id,undefined,'GET')).json();renderJob();if(jobBusy(SchemaBridgeState.migration.finalJob))SchemaBridgeState.migration.polling=setTimeout(pollJob,1500);else refreshHistory();}catch(e){error(e.message);SchemaBridgeState.migration.polling=setTimeout(pollJob,5000);} }
-$('jobDownload').addEventListener('click',()=>save(new Blob([JSON.stringify(SchemaBridgeState.migration.finalJob,null,2)],{type:'application/json'}),'execution-report.json'));
 function transferOptions(){return {maxRows:Number($('maxRows').value),maxTableBytes:Math.round(Number($('maxTableGb').value)*1e9),diskReserveBytes:Math.round(Number($('diskReserveMb').value)*1e6),fetchSize:Number($('fetchSize').value),batchRows:Number($('batchRows').value),batchBytes:Math.round(Number($('batchMb').value)*1e6),queryTimeoutSeconds:Number($('queryTimeout').value),readTimeoutSeconds:Number($('readTimeout').value),validateData:$('validateData').checked,useCopy:$('useCopy').checked};}
-$('prepareData').addEventListener('click',async()=>{if(!SchemaBridgeState.migration.lastRequest)return;try{
-  const version=SchemaBridgeState.migration.requestVersion;const previousPlan=SchemaBridgeState.migration.plan.id;const request={...SchemaBridgeState.migration.lastRequest,metadataOnly:false};
-  const started=await(await api('/preparations',request)).json();SchemaBridgeState.migration.preparationId=started.id;$('preparationSection').hidden=false;$('cancelPreparation').hidden=false;$('prepareData').disabled=true;
-  async function poll(){try{const current=await(await api('/preparations/'+started.id,undefined,'GET')).json();$('preparationState').textContent=current.message;renderProgress('preparation',current.progress);
-    if(['QUEUED','PREPARING'].includes(current.state)){SchemaBridgeState.migration.preparationPoll=setTimeout(poll,1000);return;}
-    $('cancelPreparation').hidden=true;$('prepareData').disabled=false;if(current.state==='READY'&&version===SchemaBridgeState.migration.requestVersion){SchemaBridgeState.migration.plan=current.plan;renderPlan();$('preview').textContent=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
-    if(current.state==='READY'&&version!==SchemaBridgeState.migration.requestVersion)await api('/plans/'+current.plan.id,undefined,'DELETE');
-    if(current.state==='FAILED')error(current.message);
-  }catch(e){$('prepareData').disabled=false;error(e.message);}}
-  await poll();
-}catch(e){error(e.message);$('prepareData').disabled=false;}});
-$('cancelPreparation').addEventListener('click',async()=>{try{if(SchemaBridgeState.migration.preparationId)await api('/preparations/'+SchemaBridgeState.migration.preparationId+'/cancel',{});}catch(e){error(e.message);}});
-$('cancelJob').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
-$('resumeJob').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/resume',connection('target'))).json();renderJob();pollJob();}catch(e){error(e.message);}});
 function jobStateLabel(state){return ({QUEUED:'Queued',RUNNING:'Running',SUCCEEDED:'Completed',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'})[state]||state;}
 function jobHistoryCard(job){
   const card=document.createElement('article');card.className='history-card';card.setAttribute('role','listitem');
