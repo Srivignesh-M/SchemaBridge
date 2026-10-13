@@ -34,92 +34,9 @@ $('confirmRevert').addEventListener('click',async()=>{
   catch(e){clearRevertReview();$('revertState').textContent=e.message;error(e.message);}
 });
 $('cancelRevert').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
-function setCatalogMode(prefix, selection) {
-  SchemaBridgeState.migration.catalogSelection[prefix] = selection;
-  $(prefix+'Dialect').disabled = !!selection;
-  for (const suffix of ['Host','Port','Database','Username','Password']) $(prefix+suffix).readOnly = !!selection;
-  if (selection) {
-    $(prefix+'Dialect').value = selection.connection.dialect; applyDialect(prefix);
-    for (const [suffix, key] of [['Host','host'],['Port','port'],['Database','database'],['Username','username'],['Password','password']]) $(prefix+suffix).value = selection.connection[key];
-    $(prefix+'DatabaseLabel').textContent = selection.connection.dialect === 'ORACLE' ? 'Oracle '+selection.mode : 'PostgreSQL database name';
-    $(prefix+'DatabaseHelp').textContent = 'Loaded from LCNC: '+selection.name+'. Choose Manual entry to edit connection values.';
-  } else { applyDialect(prefix); $(prefix+'Catalog').value=''; }
-  fillOptions($(prefix+'SchemaSelect'), []);
-  if(prefix === 'source') {fillOptions($('sourceTables'), []);$('columnOptions').replaceChildren();if($('tablePickerList'))renderTablePicker();}
-  else $('targetSchema').value = selection?.schema || ($(prefix+'Dialect').value === 'ORACLE' ? 'APP' : 'public');
-  invalidate();
-}
-async function loadCatalog() {
-  if (SchemaBridgeState.migration.catalogLoading) return;
-  SchemaBridgeState.migration.catalogLoading = true;
-  for(const prefix of ['source','target']) $(prefix+'CatalogRefresh').disabled = true;
-  try {
-    const result = await (await api('/datasources',undefined,'GET')).json();
-    if (!result.configured) throw new Error('LCNC catalogue is not configured. Manual entry remains available.');
-    for(const prefix of ['source','target']) {
-      const select=$(prefix+'Catalog'), selected=select.value; select.replaceChildren(new Option('Manual entry',''));
-      for(const item of result.datasources) { const option=new Option(`${item.name} (#${item.id})${item.supported?' — '+item.dialect:' — '+item.finding}`,String(item.id)); option.disabled=!item.supported; option.title=item.description || ''; select.add(option); }
-      select.value=selected;
-      if (!select.value && SchemaBridgeState.migration.catalogSelection[prefix]) setCatalogMode(prefix,null);
-      $(prefix+'CatalogStatus').textContent = result.datasources.length+' active, approved master JDBC entries. Select one, then connect.';
-    }
-  } catch(e) { error(e.message); }
-  finally { SchemaBridgeState.migration.catalogLoading=false; for(const prefix of ['source','target']) $(prefix+'CatalogRefresh').disabled = $(prefix+'Connection').hidden; }
-}
 const flow = () => document.querySelector('input[name="flow"]:checked').value;
 const usesDatabase = () => flow().startsWith('db-');
 const writesDatabase = () => flow().endsWith('-db');
-function connectionForm(prefix) {
-  const host = document.createElement('div');
-  // Template contains only fixed application markup, never database or user content.
-  host.innerHTML = `<div class="connection-grid"><label>Host<input id="${prefix}Host" value="localhost" autocomplete="off" required></label><label>Port<input id="${prefix}Port" type="number" min="1" max="65535" value="${prefix === 'source' ? 1521 : 5432}" required></label></div><label><span id="${prefix}DatabaseLabel">Database name</span><input id="${prefix}Database" autocomplete="off" aria-describedby="${prefix}DatabaseHelp" required></label><p id="${prefix}DatabaseHelp" class="muted"></p><label>Username<input id="${prefix}Username" autocomplete="off" required></label><label>Password<input id="${prefix}Password" type="password" autocomplete="new-password"></label><button type="button" id="${prefix}Connect" class="secondary">Connect & load schemas</button><label>${prefix === 'source' ? 'Source schema' : 'Available target schemas'}<select id="${prefix}SchemaSelect"><option value="">Connect first</option></select></label>`;
-  $(prefix + 'Connection').append(host);
-  const chooser=document.createElement('div');
-  chooser.innerHTML=`<label>Connection source<select id="${prefix}Catalog"><option value="">Manual entry</option></select></label><button type="button" class="secondary" id="${prefix}CatalogRefresh">Load / refresh LCNC datasources</button><p class="muted" id="${prefix}CatalogStatus">Use manual entry or load saved connections from fg_datasource.</p>`;
-  host.prepend(chooser);
-  $(prefix+'CatalogRefresh').addEventListener('click',loadCatalog);
-  let selectionVersion=0;
-  $(prefix+'Catalog').addEventListener('change',async()=>{
-    const id=$(prefix+'Catalog').value, version=++selectionVersion;
-    if(!id) { setCatalogMode(prefix,null); $(prefix+'Connect').disabled=$(prefix+'Connection').hidden; return; }
-    $(prefix+'Connect').disabled=true;
-    try { const selected=await(await api('/datasources/'+encodeURIComponent(id)+'/select',{})).json(); if(version===selectionVersion) setCatalogMode(prefix,selected); }
-    catch(e) { if(version===selectionVersion) { setCatalogMode(prefix,null); error(e.message); } }
-    finally { if(version===selectionVersion) $(prefix+'Connect').disabled=$(prefix+'Connection').hidden; }
-  });
-  applyDialect(prefix);
-  $(prefix + 'Database').addEventListener('input', () => $(prefix + 'Database').setCustomValidity(''));
-  $(prefix + 'Connect').addEventListener('click', async () => {
-    const button = $(prefix + 'Connect'); button.disabled = true;
-    try { const schemas = await (await api('/schemas', connection(prefix))).json(); fillOptions($(prefix + 'SchemaSelect'), schemas); const preferred=SchemaBridgeState.migration.catalogSelection[prefix]?.schema; if(preferred && schemas.includes(preferred)) $(prefix+'SchemaSelect').value=preferred; $('configStatus').textContent = 'Connected. Select a schema.'; invalidate(); if (prefix === 'source') await loadTables(); else $('targetSchema').value = $(prefix + 'SchemaSelect').value; }
-    catch (e) { error(e.message); } finally { button.disabled = false; }
-  });
-  $(prefix + 'SchemaSelect').addEventListener('change', async () => { invalidate(); if (prefix === 'source') await loadTables(); else $('targetSchema').value = $(prefix + 'SchemaSelect').value; });
-}
-function applyDialect(prefix) {
-  const dialect = $(prefix + 'Dialect').value, field = $(prefix + 'Database');
-  if (field.dataset.dialect) SchemaBridgeState.migration.databaseNames[prefix][field.dataset.dialect] = field.value;
-  field.value = SchemaBridgeState.migration.databaseNames[prefix][dialect] ?? (dialect === 'POSTGRESQL' ? 'postgres' : '');
-  field.dataset.dialect = dialect; field.setCustomValidity('');
-  field.placeholder = dialect === 'POSTGRESQL' ? 'postgres or your application database' : 'For example, XEPDB1';
-  $(prefix + 'DatabaseLabel').textContent = dialect === 'POSTGRESQL' ? 'PostgreSQL database name' : 'Oracle service name';
-  $(prefix + 'DatabaseHelp').textContent = dialect === 'POSTGRESQL'
-    ? 'postgres is the default connection database. Replace it with the database containing your schemas; selecting PostgreSQL only chooses the engine.'
-    : 'Enter the Oracle service name, for example XEPDB1. Select the schema after connecting.';
-  $(prefix + 'Port').value = dialect === 'ORACLE' ? '1521' : '5432';
-}
-function connection(prefix) {
-  if ($(prefix+'Catalog').value && String(SchemaBridgeState.migration.catalogSelection[prefix]?.id) !== $(prefix+'Catalog').value) throw new Error('Wait for the selected LCNC datasource to load.');
-  const dialect = $(prefix + 'Dialect').value, databaseField = $(prefix + 'Database'), database = databaseField.value.trim();
-  if (!database) {
-    const message = `${prefix === 'source' ? 'Source' : 'Target'} ${dialect === 'POSTGRESQL' ? 'PostgreSQL database name' : 'Oracle service name'} is required.`;
-    databaseField.setCustomValidity(message); databaseField.reportValidity(); throw new Error(message);
-  }
-  databaseField.setCustomValidity('');
-  for (const suffix of ['Host', 'Port', 'Username']) { const field = $(prefix + suffix); if (!field.checkValidity()) { field.reportValidity(); throw new Error(`Check the ${prefix} ${suffix.toLowerCase()} field.`); } }
-  return {dialect,host:$(prefix + 'Host').value.trim(),port:Number($(prefix + 'Port').value),database,username:$(prefix + 'Username').value,password:$(prefix + 'Password').value,...(SchemaBridgeState.migration.catalogSelection[prefix]?{jdbcUrl:SchemaBridgeState.migration.catalogSelection[prefix].connection.jdbcUrl}:{})};
-}
-function fillOptions(select, values) { select.replaceChildren(); for (const value of values) { const option = document.createElement('option'); option.value = option.textContent = value; select.append(option); } }
 async function loadTables() { $('columnOptions').replaceChildren();fillOptions($('sourceTables'),[]); try { const schema = $('sourceSchemaSelect').value; if (schema) fillOptions($('sourceTables'), await (await api('/tables', {connection:connection('source'),schema})).json()); renderTablePicker(); } catch(e) { renderTablePicker();error(e.message); } }
 function goToStep(step, scroll=true) {
   if (step > SchemaBridgeState.migration.maxStep || step < 1) return;
