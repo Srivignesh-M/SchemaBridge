@@ -21,6 +21,8 @@
   <script src="/js/execution-page.js" defer></script>
   <script src="/js/revert-panel.js" defer></script>
   <script src="/js/history-page.js" defer></script>
+  <script src="/js/storage-page.js" defer></script>
+  <script src="/js/settings-page.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -90,7 +92,7 @@
       <label class="inline"><input id="validateData" type="checkbox" checked> Verify transferred data before committing each table</label>
       <label class="inline"><input id="useCopy" type="checkbox"> Use PostgreSQL bulk loading (COPY) for database sources</label>
       <p class="muted">Completed tables are retained after a later failure. A higher row limit is not a guarantee for every table shape.</p></details></section>
-      <section class="card"><div class="section-title"><h2>Reusable configuration</h2></div><p class="muted">Save dialects, connection host/port/database/username, target schema and transfer settings as a JSON profile — never passwords. Re-enter passwords after importing.</p><div class="action-bar"><button type="button" id="exportSettings" class="secondary">Export settings</button><label class="upload">Import settings<input id="importSettings" type="file" accept="application/json"></label></div></section>
+      <section class="card"><div class="section-title"><h2>Export / import settings</h2></div><p class="muted">Download the current dialects, connection host/port/database/username, target schema and transfer settings as a local JSON file — never passwords. Nothing is stored on the server; this is not a saved-connections manager. Re-enter passwords after importing.</p><div class="action-bar"><button type="button" id="exportSettings" class="secondary">Export settings</button><label class="upload">Import settings<input id="importSettings" type="file" accept="application/json"></label></div></section>
       <div class="action-bar"><button type="button" class="secondary" data-back="1">Back</button><span id="configStatus" role="status">Configure a source to begin.</span><button id="analyse" type="submit">Analyse and review <span>→</span></button></div>
     </section>
 

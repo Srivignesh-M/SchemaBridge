@@ -8,7 +8,7 @@ const dom=new JSDOM(html,{url:'http://localhost:8098',runScripts:'outside-only'}
 const {window}=dom;
 window.fetch=async()=>({ok:true,status:200,json:async()=>({dialects:['ORACLE','POSTGRESQL'],executionPolicy:'INSERT_ONLY'})});
 try {
-  const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page'];
+  const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page','storage-page','settings-page'];
   let combined='';
   for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
   combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8')+'\nwindow.SchemaBridgeState=SchemaBridgeState;window.renderPlan=renderPlan;';
