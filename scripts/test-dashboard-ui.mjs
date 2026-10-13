@@ -6,7 +6,7 @@ const {JSDOM}=require('jsdom');
 const html=await readFile(new URL('../src/main/resources/static/index.html',import.meta.url),'utf8');
 const dom=new JSDOM(html,{url:'http://localhost:8098',runScripts:'outside-only'});
 const {window}=dom;
-const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page','storage-page','settings-page','dashboard-page'];
+const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page','storage-page','settings-page','dashboard-page','shell'];
 window.fetch = async (path) => ({
   ok:true, status:200,
   json: async () => path.endsWith('/jobs') ? [

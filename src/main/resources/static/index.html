@@ -24,9 +24,31 @@
   <script src="/js/storage-page.js" defer></script>
   <script src="/js/settings-page.js" defer></script>
   <script src="/js/dashboard-page.js" defer></script>
+  <script src="/js/shell.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
+<div class="app-shell">
+  <nav class="app-sidebar" aria-label="Primary">
+    <div class="app-brand"><span class="brand-mark">S</span><span class="brand-label">Schema Bridge</span></div>
+    <a href="#" data-nav-page="dashboard" class="active" aria-current="page">Dashboard</a>
+    <a href="#" data-nav-page="migration">Migration</a>
+    <a href="#" data-nav-page="history">History</a>
+    <a href="#" data-nav-page="storage">Storage</a>
+    <a href="#" data-nav-page="settings">Settings</a>
+  </nav>
+  <div class="app-main">
+  <section id="dashboardPage" class="app-page">
+    <div class="section-heading"><h2>Dashboard</h2><p class="muted">Database Migration Workspace</p></div>
+    <div id="dashboardQuickStart" class="dashboard-quick"></div>
+    <section class="card"><div class="section-title"><h2>Recent Migration Activity</h2><button id="dashboardRefresh" type="button" class="secondary">Refresh</button></div>
+      <div class="table-scroll"><table><thead><tr><th>Source</th><th>Target</th><th>Status</th><th>Rows</th></tr></thead><tbody id="dashboardActivity"></tbody></table></div>
+    </section>
+    <section class="card"><h2>Storage</h2><dl class="progress-metrics" id="dashboardStorage"></dl></section>
+  </section>
+  <section id="historyPage" class="app-page" hidden></section>
+  <section id="storagePage" class="app-page" hidden></section>
+  <section id="settingsPage" class="app-page" hidden></section>
 <header>
   <a class="brand" href="/" aria-label="SchemaBridge home">S<span>↗</span></a>
   <div><strong>SchemaBridge</strong><span class="sub">SQL Migration Studio</span></div>
@@ -37,15 +59,7 @@
     <button type="button" data-step-nav="4" disabled><span>04</span> Results</button>
   </nav>
 </header>
-<main>
-  <section id="dashboardPage" class="app-page">
-    <div class="section-heading"><h2>Dashboard</h2><p class="muted">Database Migration Workspace</p></div>
-    <div id="dashboardQuickStart" class="dashboard-quick"></div>
-    <section class="card"><div class="section-title"><h2>Recent Migration Activity</h2><button id="dashboardRefresh" type="button" class="secondary">Refresh</button></div>
-      <div class="table-scroll"><table><thead><tr><th>Source</th><th>Target</th><th>Status</th><th>Rows</th></tr></thead><tbody id="dashboardActivity"></tbody></table></div>
-    </section>
-    <section class="card"><h2>Storage</h2><dl class="progress-metrics" id="dashboardStorage"></dl></section>
-  </section>
+<main id="migrationPage" class="app-page">
   <form id="configuration">
     <section class="wizard-page" data-step-page="1">
       <div class="card">
@@ -162,5 +176,7 @@
   <div id="error" role="alert" hidden></div>
   <footer><img class="footer-banner" src="/images/schemabridge-banner.png" alt="SchemaBridge — Connect. Convert. Migrate."><span>SchemaBridge · Local single-user application · <span id="buildVersion" aria-label="Build version">Loading version…</span> · Credentials are kept out of reports</span></footer>
 </main>
+  </div>
+</div>
 </body>
 </html>
