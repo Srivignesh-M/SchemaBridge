@@ -34,7 +34,6 @@ $('confirmRevert').addEventListener('click',async()=>{
   catch(e){clearRevertReview();$('revertState').textContent=e.message;error(e.message);}
 });
 $('cancelRevert').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
-async function loadTables() { $('columnOptions').replaceChildren();fillOptions($('sourceTables'),[]); try { const schema = $('sourceSchemaSelect').value; if (schema) fillOptions($('sourceTables'), await (await api('/tables', {connection:connection('source'),schema})).json()); renderTablePicker(); } catch(e) { renderTablePicker();error(e.message); } }
 connectionForm('source'); connectionForm('target');
 document.querySelectorAll('input[name="flow"]').forEach(input => input.addEventListener('change', updateFlow));
 document.querySelectorAll('[data-step-nav]').forEach(button => button.addEventListener('click',()=>goToStep(Number(button.dataset.stepNav))));
@@ -229,107 +228,6 @@ $('importSettings').addEventListener('change',async()=>{
     $('configStatus').textContent='Settings imported. Passwords were not included — enter them before connecting.';
   }catch(e){error('Could not import settings: '+e.message);}
   finally{$('importSettings').value='';}
-});
-function selectedSourceTables(){return Array.from($('sourceTables').selectedOptions).map(option=>option.value);}
-function renderTablePicker(){
-  if(!$('tablePickerList'))return;
-  const selected=new Set(selectedSourceTables()),list=$('tablePickerList');list.replaceChildren();
-  for(const option of $('sourceTables').options){const label=document.createElement('label');label.className='table-picker-option';label.dataset.name=option.value.toLocaleLowerCase();const check=document.createElement('input');check.type='checkbox';check.checked=selected.has(option.value);check.value=option.value;const name=document.createElement('span');name.textContent=option.value;label.append(check,name);list.append(label);}
-  const query=$('tableSearch').value.trim().toLocaleLowerCase();for(const row of list.querySelectorAll('.table-picker-option'))row.hidden=!row.dataset.name.includes(query);
-  updateTablePickerSummary();syncTableSettings();
-}
-function updateTablePickerSummary(){
-  const selected=selectedSourceTables();
-  if($('tableSelectionSummary'))$('tableSelectionSummary').textContent=selected.length?`${selected.length} table${selected.length===1?'':'s'} selected`:'No tables selected yet.';
-  if($('pickerCount'))$('pickerCount').textContent=selected.length?`${selected.length} table${selected.length===1?'':'s'} selected for this migration.`:'No tables selected.';
-  if($('openTablePicker'))$('openTablePicker').disabled=!$('sourceSchemaSelect').value||!$('sourceTables').options.length;
-  if($('selectAllTables')){const visible=Array.from($('tablePickerList').querySelectorAll('.table-picker-option')).filter(row=>!row.hidden),checked=visible.filter(row=>row.querySelector('input').checked).length;$('selectAllTables').checked=visible.length>0&&checked===visible.length;$('selectAllTables').indeterminate=checked>0&&checked<visible.length;$('selectAllTables').disabled=visible.length===0;}
-}
-function tableSelections(){
-  const result={},selected=new Set(selectedSourceTables());
-  for(const group of $('columnOptions').children){if(!selected.has(group.dataset.table)||group.dataset.loaded!=='true')continue;
-    const columns=[],rename={};
-    for(const row of group.querySelectorAll('[data-column]'))if(row.querySelector('input[type=checkbox]').checked){columns.push(row.dataset.column);const destination=row.querySelector('input[type=text]').value.trim();if(!destination)throw new Error('Enter a destination column name.');if(destination!==row.dataset.column)rename[row.dataset.column]=destination;}
-    if(!columns.length)throw new Error('Select at least one column for '+group.dataset.table);
-    const tableName=group.querySelector('.target-table-name').value.trim();if(!tableName)throw new Error('Enter a destination table name for '+group.dataset.table);
-    const filters=[];
-    for(const row of group.querySelectorAll('.filter-row')){const column=row.querySelector('.filter-column').value,operator=row.querySelector('.filter-operator').value,value=row.querySelector('.filter-value').value;if(!column)continue;filters.push({column,operator,value:operator.includes('NULL')?null:value});}
-    const rawLimit=group.querySelector('.table-row-limit').value;
-    const rowLimit=rawLimit===''?null:Number(rawLimit);if(rowLimit!==null&&(!Number.isInteger(rowLimit)||rowLimit<1||rowLimit>2147483647))throw new Error('Enter a positive whole-number row limit for '+group.dataset.table);
-    result[group.dataset.table]={columns,rename,filters,rowLimit,...(tableName!==group.dataset.table?{tableName}:{})};
-  }
-  return result;
-}
-function syncTableSettings(){
-  const selected=new Set(selectedSourceTables()),container=$('columnOptions');
-  const existing=new Map(Array.from(container.children,group=>[group.dataset.table,group]));
-  for(const group of container.children){group.hidden=!selected.has(group.dataset.table);group.querySelector("fieldset").disabled=group.hidden;}
-  for(const table of selected){
-    if(existing.has(table))continue;
-    const group=document.createElement('details');group.dataset.table=table;
-    const summary=document.createElement('summary');summary.textContent=table+' ? optional settings';group.append(summary);
-    const body=document.createElement('fieldset');group.append(body);container.append(group);
-    group.addEventListener('toggle',async()=>{
-      if(!group.open||group.dataset.loaded==='true'||group.dataset.loading==='true')return;
-      group.dataset.loading='true';body.textContent='Loading columns?';
-      try{
-        const columns=await(await api('/columns',{connection:connection('source'),schema:$('sourceSchemaSelect').value,table})).json();
-        if(!group.isConnected)return;
-        body.replaceChildren();
-        const label=document.createElement('label');label.textContent='Destination table name';const name=document.createElement('input');name.className='target-table-name';name.value=table;name.maxLength=128;label.append(name);body.append(label);
-        const mapping=document.createElement('details'),title=document.createElement('summary');title.textContent='Columns and destination names';mapping.append(title);
-        for(const column of columns){const row=document.createElement('label');row.className='column-mapping';row.dataset.column=column.name.value;const check=document.createElement('input');check.type='checkbox';check.checked=true;const text=document.createElement('span');text.textContent=column.name.value;const destination=document.createElement('input');destination.type='text';destination.value=column.name.value;destination.setAttribute('aria-label','Destination name for '+column.name.value);row.append(check,text,destination);mapping.append(row);}body.append(mapping);
-        const limitLabel=document.createElement('label');limitLabel.textContent='Row limit (optional)';const limit=document.createElement('input');limit.type='number';limit.min='1';limit.max='2147483647';limit.step='1';limit.className='table-row-limit';limit.placeholder='All matching rows';limitLabel.append(limit);body.append(limitLabel);
-        const note=document.createElement('p');note.className='muted';note.textContent='All filters must match (AND). No filters means all rows. A row limit selects up to that many matching rows without a guaranteed order.';body.append(note);
-        const rows=document.createElement('div');rows.className='filter-rows';body.append(rows);
-        const add=document.createElement('button');add.type='button';add.className='secondary';add.textContent='Add filter';body.append(add);
-        add.addEventListener('click',()=>{addFilterRow(rows,columns,add);invalidate();});
-        group.dataset.loaded='true';
-      }catch(e){body.textContent='Could not load settings: '+e.message+' Close and reopen to retry.';}
-      finally{delete group.dataset.loading;}
-    });
-  }
-}
-function addFilterRow(rows,columns,add){
-  if(rows.children.length>=20)return;
-  const row=document.createElement('div');row.className='filter-row';
-  const field=document.createElement('select');field.className='filter-column';field.setAttribute('aria-label','Filter column');fillOptions(field,['',...columns.filter(c=>!['TEXT','BINARY'].includes(c.type.kind)).map(c=>c.name.value)]);field.options[0].textContent='Choose column';
-  const operator=document.createElement('select');operator.className='filter-operator';operator.setAttribute('aria-label','Filter operator');
-  const holder=document.createElement('span');holder.className='filter-value-holder';
-  function updateValue(){
-    const boolean=columns.find(c=>c.name.value===field.value)?.type.kind==='BOOLEAN';
-    const old=holder.firstElementChild;const value=document.createElement(boolean?'select':'input');value.className='filter-value';value.setAttribute('aria-label','Filter value');
-    if(boolean)fillOptions(value,['true','false']);else{value.type='text';value.placeholder='Value';}
-    if(old&&old.tagName===value.tagName)value.value=old.value;
-    value.disabled=operator.value.includes('NULL')||!field.value;holder.replaceChildren(value);
-  }
-  field.addEventListener('change',()=>{const previous=operator.value,boolean=columns.find(c=>c.name.value===field.value)?.type.kind==='BOOLEAN';fillOptions(operator,boolean?['=','<>','IS NULL','IS NOT NULL']:['=','<>','>','>=','<','<=','IS NULL','IS NOT NULL']);if(Array.from(operator.options).some(o=>o.value===previous))operator.value=previous;updateValue();});
-  fillOptions(operator,['=','<>','>','>=','<','<=','IS NULL','IS NOT NULL']);operator.addEventListener('change',updateValue);updateValue();
-  const remove=document.createElement('button');remove.type='button';remove.className='secondary';remove.textContent='Remove';remove.setAttribute('aria-label','Remove filter');remove.addEventListener('click',()=>{row.remove();add.disabled=false;invalidate();});
-  row.append(field,operator,holder,remove);rows.append(row);add.disabled=rows.children.length>=20;
-}
-$('sourceTables').addEventListener('change',renderTablePicker);
-let pickerOriginalSelection=[];
-$('openTablePicker').addEventListener('click',()=>{pickerOriginalSelection=selectedSourceTables();renderTablePicker();$('tablePicker').showModal();});
-function closeTablePicker(apply){
-  if(!apply){const selected=new Set(pickerOriginalSelection);for(const option of $('sourceTables').options)option.selected=selected.has(option.value);renderTablePicker();}
-  else if(!selectedSourceTables().length||selectedSourceTables().length>500){error('Select between 1 and 500 source tables to continue.');return;}
-  $('tablePicker').close();updateTablePickerSummary();
-}
-$('closeTablePicker').addEventListener('click',()=>closeTablePicker(false));
-$('cancelTablePicker').addEventListener('click',()=>closeTablePicker(false));
-$('applyTablePicker').addEventListener('click',()=>closeTablePicker(true));
-$('tablePicker').addEventListener('cancel',()=>{const selected=new Set(pickerOriginalSelection);for(const option of $('sourceTables').options)option.selected=selected.has(option.value);renderTablePicker();});
-$('tablePickerList').addEventListener('change',event=>{
-  if(!event.target.matches('input[type=checkbox]'))return;
-  const option=Array.from($('sourceTables').options).find(item=>item.value===event.target.value);if(option)option.selected=event.target.checked;
-  $('sourceTables').dispatchEvent(new Event('change',{bubbles:true}));updateTablePickerSummary();
-});
-$('tableSearch').addEventListener('input',()=>{const query=$('tableSearch').value.trim().toLocaleLowerCase();for(const row of $('tablePickerList').querySelectorAll('.table-picker-option'))row.hidden=!row.dataset.name.includes(query);updateTablePickerSummary();});
-$('selectAllTables').addEventListener('change',()=>{
-  const visible=Array.from($('tablePickerList').querySelectorAll('.table-picker-option')).filter(row=>!row.hidden),turnOn=$('selectAllTables').checked;
-  for(const row of visible){const checkbox=row.querySelector('input');checkbox.checked=turnOn;const option=Array.from($('sourceTables').options).find(item=>item.value===checkbox.value);if(option)option.selected=turnOn;}
-  $('sourceTables').dispatchEvent(new Event('change',{bubbles:true}));updateTablePickerSummary();
 });
 async function loadBuildVersion(){try{const response=await api('/capabilities',undefined,'GET');const info=await response.json();$('buildVersion').textContent='Version '+info.version;}catch(_){$('buildVersion').textContent='Version unavailable';}}
 updateFlow();refreshHistory();refreshStorage();loadBuildVersion();

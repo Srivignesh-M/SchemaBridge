@@ -12,7 +12,7 @@ const change=node=>node.dispatchEvent(new window.Event('change',{bubbles:true}))
 const settle=()=>new Promise(resolve=>setTimeout(resolve,25));
 const lastError=()=>Array.from(window.document.querySelectorAll('[data-toast-type="error"]')).at(-1)?.textContent||'';
 try{
-  const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper'];
+  const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker'];
   let combined='';
   for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
   combined+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8')+'\nwindow.readSelections=tableSelections;';
@@ -56,4 +56,35 @@ try{
   el('sourceTables').add(new window.Option('extra','extra',true,true));change(el('sourceTables'));
   el('applyTablePicker').click();assert.match(lastError(),/500 source tables/);
   console.log('Table settings UI passed: lazy loading, 500 selections, multiple typed filters, null checks, removal, limits, retained settings and 501 rejection.');
+
+  // --- New: Columns/Filters/Row-limit must be independently collapsible <details> ---
+  const group2 = window.document.querySelector('#columnOptions > details[data-table]');
+  const sections = group2.querySelectorAll('.mc-disclosure, details[data-settings-section]');
+  assert.ok(sections.length >= 3, 'expected Columns, Filters, and Row limit as separate disclosures');
+  const byLabel = name => Array.from(sections).find(s => s.querySelector('summary').textContent.includes(name));
+  const columnsSection = byLabel('Columns'), filtersSection = byLabel('Filters'), rowLimitSection = byLabel('Row limit');
+  assert.ok(columnsSection && filtersSection && rowLimitSection, 'all three sections must be present and labeled');
+  // Each is independently toggleable without affecting the others.
+  filtersSection.open = true; columnsSection.open = false;
+  assert.equal(filtersSection.open, true); assert.equal(columnsSection.open, false);
+  console.log('table-settings-ui: collapsible sections assertions passed');
+
+  // --- New: a slow /columns fetch for the previous schema must not land after the schema changed (Review Focus #4) ---
+  let resolveSlowFetch;
+  const realFetch = window.fetch;
+  window.fetch = (path, options) => {
+    if (path === '/api/columns') return new Promise(resolve => { resolveSlowFetch = () => resolve({ok:true,status:200,json:async()=>[{name:{value:'id'},type:{kind:'INTEGER'}}]}); });
+    return realFetch(path, options);
+  };
+  window.document.getElementById('sourceSchemaSelect').innerHTML = '<option value="schema_a">schema_a</option><option value="schema_b">schema_b</option>';
+  window.document.getElementById('sourceSchemaSelect').value = 'schema_a';
+  const slowGroup = Array.from(window.document.querySelectorAll('#columnOptions > details[data-table]')).find(g => g.dataset.loaded !== 'true');
+  slowGroup.open = true; slowGroup.dispatchEvent(new window.Event('toggle'));
+  await new Promise(setImmediate);
+  window.document.getElementById('sourceSchemaSelect').value = 'schema_b'; // schema changes before the fetch resolves
+  resolveSlowFetch();
+  await new Promise(setImmediate); await new Promise(setImmediate);
+  assert.notEqual(slowGroup.dataset.loaded, 'true', 'a response for the old schema must not be applied after the schema changed');
+  window.fetch = realFetch;
+  console.log('table-settings-ui: stale-schema race guard passed');
 }finally{window.close();}
