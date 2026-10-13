@@ -5,7 +5,7 @@ import {createRequire} from 'node:module';
 const require=createRequire(new URL('../target/ui-test/package.json',import.meta.url));
 const {JSDOM}=require('jsdom');
 const html=await readFile(new URL('../src/main/resources/static/index.html',import.meta.url),'utf8');
-const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker'];
+const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page'];
 const dom=new JSDOM(html,{url:'http://localhost:8098',runScripts:'outside-only'});
 const {window}=dom, requests=[];
 window.fetch=async(path,options)=>{
