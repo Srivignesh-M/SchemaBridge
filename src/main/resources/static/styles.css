@@ -81,6 +81,8 @@ main{padding-top:22px}
 .app-brand{display:flex;align-items:center;gap:10px;padding:0 16px 18px;font-weight:700;font-size:14px;border-bottom:1px solid var(--border);margin-bottom:12px}
 .brand-mark{width:26px;height:26px;border-radius:6px;background:var(--accent);color:var(--bg-primary);display:grid;place-items:center;font-weight:800;font-size:13px}
 .app-sidebar a{display:flex;align-items:center;gap:10px;padding:9px 16px;color:var(--text-secondary);font-size:13px;font-weight:500;text-decoration:none}
+.app-sidebar a .ic{display:grid;place-items:center;width:20px;height:20px;flex-shrink:0;border-radius:5px;background:var(--bg-elevated);font-size:11px;font-weight:700;color:inherit}
+.app-sidebar a.active .ic{background:var(--accent);color:var(--bg-primary)}
 .app-sidebar a.active{background:var(--accent-muted);color:var(--accent)}
 .app-sidebar a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .mc-disclosure{border:1px solid var(--border);border-radius:8px;margin:10px 0;background:var(--bg-surface);overflow:hidden}
@@ -96,3 +98,5 @@ main{padding-top:22px}
 .dashboard-qcard span{color:var(--text-secondary)}
 @media(max-width:800px){.app-shell{grid-template-columns:56px 1fr}.app-sidebar .brand-label,.app-sidebar a span:not(.ic){display:none}.app-sidebar a{justify-content:center}.dashboard-quick{grid-template-columns:repeat(2,1fr)}}
 .app-page[hidden]{display:none}
+#dashboardPage,#historyPage,#storagePage,#settingsPage{max-width:1240px;margin:auto;padding:44px 24px}
+@media(max-width:800px){#dashboardPage,#historyPage,#storagePage,#settingsPage{padding:25px 16px}}

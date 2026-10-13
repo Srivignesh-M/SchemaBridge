@@ -19,7 +19,7 @@ function renderJob(){
 async function pollJob(){
   const m = SchemaBridgeState.migration;
   clearTimeout(m.polling);
-  try{m.finalJob=await(await api('/jobs/'+m.finalJob.id,undefined,'GET')).json();renderJob();if(jobBusy(m.finalJob))m.polling=setTimeout(pollJob,1500);else refreshHistory();}catch(e){error(e.message);m.polling=setTimeout(pollJob,5000);}
+  try{m.finalJob=await(await api('/jobs/'+m.finalJob.id,undefined,'GET')).json();renderJob();if(jobBusy(m.finalJob)){if(currentPageId()==='migration')m.polling=setTimeout(pollJob,1500);}else refreshHistory();}catch(e){error(e.message);if(currentPageId()==='migration')m.polling=setTimeout(pollJob,5000);}
 }
 document.getElementById('jobDownload').addEventListener('click',()=>save(new Blob([JSON.stringify(SchemaBridgeState.migration.finalJob,null,2)],{type:'application/json'}),'execution-report.json'));
 document.getElementById('prepareData').addEventListener('click',async()=>{
@@ -28,7 +28,7 @@ document.getElementById('prepareData').addEventListener('click',async()=>{
   const version=m.requestVersion;const previousPlan=m.plan.id;const request={...m.lastRequest,metadataOnly:false};
   const started=await(await api('/preparations',request)).json();m.preparationId=started.id;document.getElementById('preparationSection').hidden=false;document.getElementById('cancelPreparation').hidden=false;document.getElementById('prepareData').disabled=true;
   async function poll(){try{const current=await(await api('/preparations/'+started.id,undefined,'GET')).json();document.getElementById('preparationState').textContent=current.message;renderProgress('preparation',current.progress);
-    if(['QUEUED','PREPARING'].includes(current.state)){m.preparationPoll=setTimeout(poll,1000);return;}
+    if(['QUEUED','PREPARING'].includes(current.state)){if(currentPageId()==='migration')m.preparationPoll=setTimeout(poll,1000);return;}
     document.getElementById('cancelPreparation').hidden=true;document.getElementById('prepareData').disabled=false;if(current.state==='READY'&&version===m.requestVersion){m.plan=current.plan;renderPlan();document.getElementById('preview').textContent=await(await api('/plans/'+m.plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
     if(current.state==='READY'&&version!==m.requestVersion)await api('/plans/'+current.plan.id,undefined,'DELETE');
     if(current.state==='FAILED')error(current.message);

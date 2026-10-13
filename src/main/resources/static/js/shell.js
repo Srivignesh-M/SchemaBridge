@@ -10,6 +10,7 @@ async function navigateToPage(pageId){
   }
   activePage = pageId;
   for (const id of PAGE_IDS) { const el = document.getElementById(id + 'Page'); if (el) el.hidden = id !== pageId; }
+  document.getElementById('migrationSteps').hidden = pageId !== 'migration';
   document.querySelectorAll('[data-nav-page]').forEach(link => {
     const active = link.dataset.navPage === pageId;
     link.classList.toggle('active', active);

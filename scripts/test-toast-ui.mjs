@@ -31,4 +31,13 @@ assert.ok(!banner.hasAttribute('data-toast-autofade'), 'error toasts must never 
 handle.dismiss();
 assert.equal(window.document.querySelectorAll('[data-toast-type="error"]').length, 1, 'dismiss() removes only its own toast');
 
+// Review finding #6: identical error messages repeating (e.g. a poll-retry failure firing every
+// few seconds) must not grow the stack forever — they should bump a count on the existing toast.
+for (let i = 0; i < 5; i++) window.toast('A second failure', {type:'error'});
+assert.equal(window.document.querySelectorAll('[data-toast-type="error"]').length, 1, 'identical repeated errors must dedupe, not pile up');
+assert.match(window.document.querySelector('[data-toast-type="error"]').textContent, /×6/, 'the deduped toast should show how many times it has recurred');
+// A genuinely different error must still stack as its own toast (Review Focus #5 must still hold).
+window.toast('A third, different failure', {type:'error'});
+assert.equal(window.document.querySelectorAll('[data-toast-type="error"]').length, 2, 'a different error message must still stack separately');
+
 console.log('toast-ui: all assertions passed');

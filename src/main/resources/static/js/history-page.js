@@ -28,7 +28,7 @@ function jobHistoryCard(job){
       if(!window.confirm(prompt))return;
       remove.disabled=true;
       const m = SchemaBridgeState.migration;
-      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');if(m.finalJob?.id===job.id){clearTimeout(m.polling);document.getElementById('jobSection').hidden=true;document.getElementById('revertSection').hidden=true;clearRevertReview();}if(m.plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
+      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');if(m.finalJob?.id===job.id){clearTimeout(m.polling);m.polling=null;m.finalJob=null;document.getElementById('jobSection').hidden=true;document.getElementById('revertSection').hidden=true;clearRevertReview();}if(m.plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
     });
     actions.append(remove);
   }

@@ -23,7 +23,8 @@ jobs:
         run: mvn -B -ntp -f pom.xml verify
 
       - name: Node syntax check
-        run: node --check src/main/resources/static/app.js
+        shell: pwsh
+        run: Get-ChildItem src/main/resources/static/js/*.js | ForEach-Object { node --check $_.FullName }
 
       - name: jsdom-driven frontend logic tests
         shell: pwsh
@@ -33,3 +34,9 @@ jobs:
           node scripts/test-bulk-ui.mjs
           node scripts/test-catalog-ui.mjs
           node scripts/test-table-settings-ui.mjs
+          node scripts/test-review-page-ui.mjs
+          node scripts/test-history-guard-ui.mjs
+          node scripts/test-settings-import-ui.mjs
+          node scripts/test-dashboard-ui.mjs
+          node scripts/test-shell-navigation-ui.mjs
+          node scripts/test-toast-ui.mjs

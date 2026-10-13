@@ -11,7 +11,7 @@ try {
   const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page','storage-page','settings-page','dashboard-page','shell'];
   let combined='';
   for (const file of JS_FILES) combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
-  combined+=await readFile(new URL('../src/main/resources/static/js/main.js',import.meta.url),'utf8')+'\nwindow.SchemaBridgeState=SchemaBridgeState;window.invalidate=invalidate;window.hasUnfinishedMigrationWork=hasUnfinishedMigrationWork;';
+  combined+=await readFile(new URL('../src/main/resources/static/js/main.js',import.meta.url),'utf8')+'\nwindow.SchemaBridgeState=SchemaBridgeState;window.invalidate=invalidate;window.hasUnfinishedMigrationWork=hasUnfinishedMigrationWork;window.jobHistoryCard=jobHistoryCard;';
   window.eval(combined);
 
   // Case 1: fresh session, nothing configured yet -> no unfinished work.
@@ -43,6 +43,20 @@ try {
   window.SchemaBridgeState.migration.finalJob = null;
   window.SchemaBridgeState.migration.lastRequest = null;
   assert.equal(window.hasUnfinishedMigrationWork(), false);
+
+  // Review finding (related to #6): deleting the saved migration that `finalJob` currently points
+  // to must clear `finalJob`, so Migration doesn't keep polling a job that no longer exists.
+  window.SchemaBridgeState.migration.finalJob = {id:'doomed-job', state:'SUCCEEDED', planId:'plan-x'};
+  const doomedJob = {id:'doomed-job', state:'SUCCEEDED', planId:'plan-x', tables:[{table:'t'}], progress:{rowsCommitted:1}, message:'done'};
+  window.confirm = () => true;
+  window.fetch = async (path, options) => { if (options?.method === 'DELETE') return {ok:true,status:200,json:async()=>({})}; return {ok:true,status:200,json:async()=>({dialects:['ORACLE','POSTGRESQL'],executionPolicy:'INSERT_ONLY'})}; };
+  const card = window.jobHistoryCard(doomedJob);
+  window.document.body.append(card);
+  const removeButton = Array.from(card.querySelectorAll('button')).find(b => /Delete saved files/.test(b.textContent));
+  removeButton.click();
+  await new Promise(setImmediate); await new Promise(setImmediate); await new Promise(setImmediate);
+  assert.equal(window.SchemaBridgeState.migration.finalJob, null, 'deleting the job finalJob points to must clear finalJob, or Migration keeps polling a 404');
+
   console.log('history-guard-ui: all assertions passed');
   await new Promise(resolve=>setTimeout(resolve,50));
 } finally { window.close(); }

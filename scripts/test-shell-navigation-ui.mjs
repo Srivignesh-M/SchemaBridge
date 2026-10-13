@@ -43,6 +43,28 @@ try {
   await window.navigateToPage('migration');
   await new Promise(setImmediate); await new Promise(setImmediate); await new Promise(setImmediate);
   assert.equal(window.SchemaBridgeState.migration.polling, null, 'a finished job must not resume polling on return');
+
+  // The migration-only stepper must not show (or be interactive) on other pages (review finding #3).
+  await window.navigateToPage('history');
+  assert.equal(window.document.getElementById('migrationSteps').hidden, true, 'the Workflow/Configure/Review/Results stepper is migration-only and must be hidden elsewhere');
+  await window.navigateToPage('migration');
+  assert.equal(window.document.getElementById('migrationSteps').hidden, false, 'the stepper must be visible again on Migration');
+
+  // Review finding #2: navigating away WHILE a poll's fetch is in flight must not let the
+  // continuation re-arm the timer after we've already left (it would otherwise leak forever).
+  jobState = 'RUNNING';
+  window.SchemaBridgeState.migration.finalJob = {id:'running-job-1', state:'RUNNING', message:'x', tables:[], progress:{}};
+  let resolveSlowPoll;
+  const realFetch2 = window.fetch;
+  window.fetch = (path) => { fetchCount++; if (path.endsWith('/jobs/running-job-1')) return new Promise(resolve => { resolveSlowPoll = () => resolve({ok:true,status:200,json:async()=>({id:'running-job-1',state:jobState,message:'x',tables:[],progress:{}})}); }); return realFetch2(path); };
+  const pollPromise = window.pollJob(); // fetch is now in flight, not yet resolved
+  await window.navigateToPage('history'); // leave before the fetch settles
+  resolveSlowPoll();
+  await pollPromise;
+  await new Promise(setImmediate); await new Promise(setImmediate);
+  window.fetch = realFetch2;
+  assert.equal(window.SchemaBridgeState.migration.polling, null, 'a poll whose fetch resolves after navigating away must not re-arm the timer (Review Focus #1)');
+
   console.log('shell-navigation-ui: all assertions passed');
   await new Promise(resolve=>setTimeout(resolve,50));
 } finally { window.close(); }

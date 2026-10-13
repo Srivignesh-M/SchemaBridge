@@ -31,13 +31,23 @@
 <div class="app-shell">
   <nav class="app-sidebar" aria-label="Primary">
     <div class="app-brand"><span class="brand-mark">S</span><span class="brand-label">Schema Bridge</span></div>
-    <a href="#" data-nav-page="dashboard" class="active" aria-current="page">Dashboard</a>
-    <a href="#" data-nav-page="migration">Migration</a>
-    <a href="#" data-nav-page="history">History</a>
-    <a href="#" data-nav-page="storage">Storage</a>
-    <a href="#" data-nav-page="settings">Settings</a>
+    <a href="#" data-nav-page="dashboard" class="active" aria-current="page"><span class="ic" aria-hidden="true">D</span><span>Dashboard</span></a>
+    <a href="#" data-nav-page="migration"><span class="ic" aria-hidden="true">M</span><span>Migration</span></a>
+    <a href="#" data-nav-page="history"><span class="ic" aria-hidden="true">H</span><span>History</span></a>
+    <a href="#" data-nav-page="storage"><span class="ic" aria-hidden="true">S</span><span>Storage</span></a>
+    <a href="#" data-nav-page="settings"><span class="ic" aria-hidden="true">⚙</span><span>Settings</span></a>
   </nav>
   <div class="app-main">
+  <header>
+    <a class="brand" href="/" aria-label="SchemaBridge home">S<span>↗</span></a>
+    <div><strong>SchemaBridge</strong><span class="sub">SQL Migration Studio</span></div>
+    <nav class="steps" id="migrationSteps" aria-label="Migration steps">
+      <button type="button" data-step-nav="1" class="active" aria-current="step"><span>01</span> Workflow</button>
+      <button type="button" data-step-nav="2" disabled><span>02</span> Configure</button>
+      <button type="button" data-step-nav="3" disabled><span>03</span> Review</button>
+      <button type="button" data-step-nav="4" disabled><span>04</span> Results</button>
+    </nav>
+  </header>
   <section id="dashboardPage" class="app-page">
     <div class="section-heading"><h2>Dashboard</h2><p class="muted">Database Migration Workspace</p></div>
     <div id="dashboardQuickStart" class="dashboard-quick"></div>
@@ -59,17 +69,7 @@
     <section class="card"><div class="section-title"><h2>Export / import settings</h2></div><p class="muted">Download the current dialects, connection host/port/database/username, target schema and transfer settings as a local JSON file — never passwords. Nothing is stored on the server; this is not a saved-connections manager. Re-enter passwords after importing.</p><div class="action-bar"><button type="button" id="exportSettings" class="secondary">Export settings</button><label class="upload">Import settings<input id="importSettings" type="file" accept="application/json"></label></div></section>
     <section class="card"><h2>About</h2><p class="muted">SchemaBridge · Local single-user application · <span id="buildVersion">Loading version…</span> · Credentials are kept out of reports</p></section>
   </section>
-<header>
-  <a class="brand" href="/" aria-label="SchemaBridge home">S<span>↗</span></a>
-  <div><strong>SchemaBridge</strong><span class="sub">SQL Migration Studio</span></div>
-  <nav class="steps" aria-label="Migration steps">
-    <button type="button" data-step-nav="1" class="active" aria-current="step"><span>01</span> Workflow</button>
-    <button type="button" data-step-nav="2" disabled><span>02</span> Configure</button>
-    <button type="button" data-step-nav="3" disabled><span>03</span> Review</button>
-    <button type="button" data-step-nav="4" disabled><span>04</span> Results</button>
-  </nav>
-</header>
-<main id="migrationPage" class="app-page">
+  <main id="migrationPage" class="app-page">
   <form id="configuration">
     <section class="wizard-page" data-step-page="1">
       <div class="card">
