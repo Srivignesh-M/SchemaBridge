@@ -8,7 +8,7 @@ const dom=new JSDOM(await readFile(new URL('../src/main/resources/static/index.h
 const {window}=dom;
 window.TextEncoder=TextEncoder;
 window.fetch=async()=>({ok:true,json:async()=>({dialects:['ORACLE','POSTGRESQL'],executionPolicy:'INSERT_ONLY'})});
-const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel'];
+const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page'];
 let combinedScript='';
 for (const file of JS_FILES) combinedScript+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
 combinedScript+=await readFile(new URL('../src/main/resources/static/app.js',import.meta.url),'utf8') + '\nwindow.loadSqlFiles = loadSqlFiles;';

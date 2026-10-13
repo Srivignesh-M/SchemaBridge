@@ -20,41 +20,6 @@ $('configuration').addEventListener('submit', async event => {
   } catch(e) { error(e.message); $('configStatus').textContent = 'Analysis failed. Check the message and try again.'; } finally { $('analyse').disabled = false; }
 });
 function transferOptions(){return {maxRows:Number($('maxRows').value),maxTableBytes:Math.round(Number($('maxTableGb').value)*1e9),diskReserveBytes:Math.round(Number($('diskReserveMb').value)*1e6),fetchSize:Number($('fetchSize').value),batchRows:Number($('batchRows').value),batchBytes:Math.round(Number($('batchMb').value)*1e6),queryTimeoutSeconds:Number($('queryTimeout').value),readTimeoutSeconds:Number($('readTimeout').value),validateData:$('validateData').checked,useCopy:$('useCopy').checked};}
-function jobStateLabel(state){return ({QUEUED:'Queued',RUNNING:'Running',SUCCEEDED:'Completed',FAILED:'Failed',CANCELLED:'Cancelled',RECOVERY_REQUIRED:'Needs reconciliation'})[state]||state;}
-function jobHistoryCard(job){
-  const card=document.createElement('article');card.className='history-card';card.setAttribute('role','listitem');
-  const heading=document.createElement('div');heading.className='history-card-heading';
-  const displayState=job.revert?.state||job.state;
-  const state=document.createElement('span');state.className='history-state state-'+displayState.toLowerCase().replaceAll('_','-');state.textContent=job.revert?(displayState==='REVERTED'?'Reverted':'Revert: '+jobStateLabel(displayState)):jobStateLabel(job.state);
-  const id=document.createElement('code');id.textContent=job.id.slice(0,8);heading.append(state,id);card.append(heading);
-  const summary=document.createElement('p');const committed=Number(job.progress?.rowsCommitted||0);summary.className='history-summary';summary.textContent=`${job.tables.length} table${job.tables.length===1?'':'s'} · ${committed.toLocaleString()} ${job.state==='RECOVERY_REQUIRED'?'rows recorded committed':'rows committed'}`;card.append(summary);
-  const detail=document.createElement('p');detail.className='history-detail';detail.textContent=job.revert?.message||job.message;card.append(detail);
-  const actions=document.createElement('div');actions.className='history-actions';
-  const view=document.createElement('button');view.className='secondary';view.textContent='View report / revert';view.addEventListener('click',async()=>{try{clearTimeout(SchemaBridgeState.migration.polling);clearRevertReview();SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+job.id,undefined,'GET')).json();$('jobSection').hidden=false;renderJob();SchemaBridgeState.migration.plan=await(await api('/plans/'+job.planId,undefined,'GET')).json();renderPlan();$('execute').disabled=true;$('preview').textContent=await(await api('/plans/'+job.planId+'/preview',undefined,'GET')).text();if(jobBusy(SchemaBridgeState.migration.finalJob))pollJob();SchemaBridgeState.migration.maxStep=4;goToStep(4);}catch(e){error(e.message);}});actions.append(view);
-  if(!jobBusy(job)){
-    const uncertain=job.state==='RECOVERY_REQUIRED'||['PARTIAL','RECOVERY_REQUIRED'].includes(job.revert?.state);
-    const remove=document.createElement('button');remove.className=uncertain?'secondary danger':'secondary';remove.textContent=uncertain?'Review and discard evidence':'Delete saved files';
-    remove.addEventListener('click',async()=>{
-      const prompt=uncertain
-        ?'This job\'s commit outcome is uncertain — these files are the evidence needed to reconcile the target (see RECOVERY-RUNBOOK.md). Only discard them after you have manually verified and reconciled the target database. Discard anyway?'
-        :'Delete this saved migration and its exported data? Target database rows will remain.';
-      if(!window.confirm(prompt))return;
-      remove.disabled=true;
-      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');if(SchemaBridgeState.migration.finalJob?.id===job.id){clearTimeout(SchemaBridgeState.migration.polling);$('jobSection').hidden=true;$('revertSection').hidden=true;clearRevertReview();}if(SchemaBridgeState.migration.plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
-    });
-    actions.append(remove);
-  }
-  card.append(actions);return card;
-}
-async function refreshHistory(){
-  const button=$('refreshHistory'),status=$('jobHistoryStatus');button.disabled=true;status.textContent='Loading saved migrations…';
-  try{const jobs=await(await api('/jobs',undefined,'GET')).json();const list=$('jobHistory');list.replaceChildren();
-    if(!jobs.length){list.textContent='No saved migrations.';status.textContent='History is up to date.';return;}
-    for(const job of jobs)list.append(jobHistoryCard(job));status.textContent=`${jobs.length} saved migration${jobs.length===1?'':'s'} loaded.`;
-  }catch(e){status.textContent='Could not refresh migration history.';error(e.message);}
-  finally{button.disabled=false;}
-}
-$('refreshHistory').addEventListener('click',refreshHistory);
 async function refreshStorage(){
   const button=$('refreshStorage');button.disabled=true;
   try{
