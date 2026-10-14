@@ -194,6 +194,8 @@ class MigrationServiceTest {
         StorageView before = service.storage();
         PlanStorage freshEntry = before.plans().stream().filter(p -> p.id().equals(fresh.id())).findFirst().orElseThrow();
         assertTrue(freshEntry.bytes() > 0); assertFalse(freshEntry.reclaimable()); assertEquals("NOT_RUN", freshEntry.state());
+        assertEquals(1, freshEntry.tables()); assertTrue(freshEntry.prepared()); assertFalse(freshEntry.active()); assertFalse(freshEntry.uncertain());
+        assertTrue(freshEntry.source().startsWith("SQL input"), freshEntry.source()); assertNotNull(freshEntry.target());
         assertTrue(before.stagedBytes() >= freshEntry.bytes()); assertTrue(before.freeDiskBytes() > 0);
         assertEquals(0, before.orphanedDirectories().size());
         // A plan with a real (unexpired) directory on disk but no matching tracked entry is an orphan.

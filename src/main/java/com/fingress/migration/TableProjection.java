@@ -36,6 +36,7 @@ final class TableProjection {
             String operator=Objects.toString(filter.operator(),"").toUpperCase(Locale.ROOT);
             if(!Set.of("=","<>",">",">=","<","<=","IS NULL","IS NOT NULL").contains(operator))throw new IllegalArgumentException("Unsupported filter operator");
             if(Set.of("TEXT","BINARY").contains(column.type().kind()))throw new IllegalArgumentException("LOB filters are unavailable");
+            if(column.type().kind().equals("JSONB"))throw new IllegalArgumentException("JSON filters are unavailable");
             conditions.add(column.name().sql(dialect)+" "+operator+(operator.contains("NULL")?"":" ?"));
             if(!operator.contains("NULL")){
                 if(filter.value()==null)throw new IllegalArgumentException("Filter value is required");
@@ -45,6 +46,9 @@ final class TableProjection {
                     case "DATE" -> java.sql.Date.valueOf(filter.value());
                     case "TIMESTAMP" -> Timestamp.valueOf(filter.value().replace('T',' '));
                     case "TIMESTAMPTZ" -> java.time.OffsetDateTime.parse(filter.value());
+                    case "REAL","DOUBLE" -> Double.valueOf(filter.value());
+                    case "UUID" -> java.util.UUID.fromString(filter.value());
+                    case "TIME" -> java.time.LocalTime.parse(filter.value());
                     default -> filter.value();
                 }; values.add(value);
             }

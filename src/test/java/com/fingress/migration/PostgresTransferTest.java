@@ -48,6 +48,31 @@ class PostgresTransferTest {
         JobView job=execute(plan(copy));assertEquals(3,job.progress().rowsCommitted());
         try(Connection c=db.connect(connection);Statement s=c.createStatement();ResultSet r=s.executeQuery("SELECT COUNT(*) FROM ((SELECT * FROM "+table(sourceSchema)+" EXCEPT ALL SELECT * FROM "+table(targetSchema)+") UNION ALL (SELECT * FROM "+table(targetSchema)+" EXCEPT ALL SELECT * FROM "+table(sourceSchema)+")) differences")){r.next();assertEquals(0,r.getLong(1));}
     }
+    void nativeTypes(boolean copy)throws Exception{
+        sql("CREATE TABLE "+table(sourceSchema)+"(id SERIAL PRIMARY KEY, ext UUID, doc JSONB, ratio REAL, score DOUBLE PRECISION, at TIME, note VARCHAR, created TIMESTAMPTZ NOT NULL DEFAULT now(), since DATE DEFAULT '1900-01-01'::date)");
+        sql("INSERT INTO "+table(sourceSchema)+"(ext,doc,ratio,score,at,note) VALUES "
+                +"('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11','{\"b\":[1,2],\"a\":\"x,\\\"y\"}',0.1,1e-05,'23:59:59.123456',repeat('v',20000)),"
+                +"('00000000-0000-0000-0000-000000000000','[]','-Infinity','NaN','24:00:00',''),"
+                +"(NULL,NULL,NULL,NULL,NULL,NULL)");
+        JobView job=execute(plan(copy));assertEquals(3,job.progress().rowsCommitted());
+        assertEquals("PASSED",job.tables().getFirst().validation().outcome());
+        try(Connection c=db.connect(connection);Statement s=c.createStatement()){
+            try(ResultSet r=s.executeQuery("SELECT COUNT(*) FROM ((SELECT * FROM "+table(sourceSchema)+" EXCEPT ALL SELECT * FROM "+table(targetSchema)+") UNION ALL (SELECT * FROM "+table(targetSchema)+" EXCEPT ALL SELECT * FROM "+table(sourceSchema)+")) differences")){r.next();assertEquals(0,r.getLong(1));}
+            // The serial column became an identity that continues after the copied ids.
+            try(ResultSet r=s.executeQuery("INSERT INTO "+table(targetSchema)+"(ext) VALUES(NULL) RETURNING id, created IS NOT NULL, since")){r.next();assertEquals(4,r.getInt(1));assertTrue(r.getBoolean(2));assertEquals("1900-01-01",r.getString(3));}
+            try(ResultSet r=s.executeQuery("SELECT data_type, character_maximum_length FROM information_schema.columns WHERE table_schema='"+targetSchema+"' AND table_name='items' AND column_name='note'")){r.next();assertEquals("character varying",r.getString(1));r.getInt(2);assertTrue(r.wasNull(),"note must stay unbounded");}
+        }
+        reverted(job);assertFalse(db.tables(connection,targetSchema).contains("items"));
+    }
+    @Test void preparedStatementsCarryPostgresNativeTypes()throws Exception{nativeTypes(false);}
+    @Test void copyCarriesPostgresNativeTypes()throws Exception{nativeTypes(true);}
+    @Test void serialWithSharedSequenceIsExcluded()throws Exception{
+        sql("CREATE SEQUENCE "+quote(sourceSchema)+".shared_seq");
+        sql("CREATE TABLE "+table(sourceSchema)+"(id BIGINT PRIMARY KEY DEFAULT nextval('"+sourceSchema+".shared_seq'))");
+        PlanView p=plan(false);
+        assertTrue(p.tables().isEmpty(),"Table using a sequence it does not own must not be planned");
+        assertTrue(p.excluded().getFirst().reason().contains("sequence it does not own"),p.excluded().toString());
+    }
     @Test void preparedStatementsPreserveRepresentativeValues()throws Exception{representative(false);}
     @Test void copyPreservesRepresentativeValues()throws Exception{representative(true);}
     @Test void metadataOnlyPlanReportsPostgresRowStatistics()throws Exception{

@@ -29,6 +29,26 @@ try {
   assert.ok(badge, 'table status must render via the shared statusBadge component, not an ad-hoc span');
   const correction = window.document.querySelector('#reportRows .muted, #reportRows ul.column-comparison li span');
   assert.ok(window.document.getElementById('reportRows').textContent.includes('Widen the target column'), 'correction text must render');
+  assert.match(window.document.getElementById('quotaSummary').textContent, /^12 rows extracted\.$/, 'plans with explicit options just report the row count');
+
+  // Automatic plans state the chosen settings, overall and per table.
+  window.SchemaBridgeState.migration.plan = {
+    id:'plan-2', orderedScript:false, issues:[], warnings:[], targetChecked:true, prepared:false, automatic:true,
+    options:{maxRows:1000000000, diskReserveBytes:24000000000, useCopy:true, validateData:true},
+    tableOptions:{fg_dms_content:{fetchSize:10, queryTimeoutSeconds:11600}, codes:{fetchSize:10000, queryTimeoutSeconds:1800}},
+    tables:[
+      {table:'fg_dms_content', status:'NEW', rows:0, estimatedRows:13809, differences:[], warnings:[], dependsOn:[], columnComparison:[], allowedActions:['CREATE_AND_LOAD','SKIP']},
+      {table:'codes', status:'NEW', rows:0, estimatedRows:50000, differences:[], warnings:[], dependsOn:[], columnComparison:[], allowedActions:['CREATE_AND_LOAD','SKIP']}
+    ]
+  };
+  window.renderPlan();
+  const summary = window.document.getElementById('quotaSummary').textContent;
+  assert.match(summary, /^About 63,809 rows estimated, not yet extracted\./);
+  assert.match(summary, /chosen automatically/); assert.match(summary, /keeps at least 24 GB free/); assert.match(summary, /PostgreSQL COPY/);
+  assert.doesNotMatch(summary, /budget/i, 'no row budget for automatic plans');
+  const tuning = Array.from(window.document.querySelectorAll('#reportRows .table-tuning')).map(e=>e.textContent);
+  assert.deepEqual(tuning, ['10 rows per fetch · up to 3h 13m per step', '10,000 rows per fetch · up to 30m per step']);
+  assert.equal(window.document.getElementById('maxRows'), null, 'transfer settings are no longer user inputs');
   console.log('review-page-ui: all assertions passed');
   await new Promise(resolve=>setTimeout(resolve,50));
 } finally { window.close(); }

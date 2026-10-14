@@ -7,6 +7,8 @@ final class TransferProgress {
     volatile String phase = "QUEUED", table = "";
     volatile long rowsRead, rowsSent, rowsCommitted, bytes, totalRows, started = System.currentTimeMillis();
     volatile long finished;
+    volatile long tablesDone, tablesTotal;
+    void tables(String phase, long total) { this.phase = phase; tablesTotal = total; tablesDone = 0; table = ""; }
     volatile boolean cancel;
     volatile Statement statement;
     void check() { if (cancel || Thread.currentThread().isInterrupted()) throw new CancellationException("Cancelled at a safe boundary"); }
@@ -15,6 +17,6 @@ final class TransferProgress {
         long processed = phase.equals("EXTRACTING") ? rowsRead : rowsSent;
         double rate = elapsed == 0 ? 0 : (double)processed / elapsed;
         Long eta = rate > 0 && totalRows > processed ? (long)((totalRows-processed)/rate) : null;
-        return new Model.Progress(phase,table,rowsRead,rowsSent,rowsCommitted,bytes,totalRows,elapsed,rate,eta,cancel);
+        return new Model.Progress(phase,table,rowsRead,rowsSent,rowsCommitted,bytes,totalRows,elapsed,rate,eta,cancel,tablesDone,tablesTotal);
     }
 }

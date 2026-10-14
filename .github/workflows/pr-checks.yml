@@ -40,3 +40,7 @@ jobs:
           node scripts/test-dashboard-ui.mjs
           node scripts/test-shell-navigation-ui.mjs
           node scripts/test-toast-ui.mjs
+          node scripts/test-analysis-ui.mjs
+          node scripts/test-catalog-unconfigured-ui.mjs
+          node scripts/test-excluded-ui.mjs
+          node scripts/test-storage-ui.mjs

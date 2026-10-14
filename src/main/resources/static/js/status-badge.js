@@ -1,12 +1,12 @@
 const STATUS_LABELS = {
   NEW:'New table', MATCH:'Already exists · match', MISMATCH:'Already exists / review', UNCHECKED:'Not inspected',
   QUEUED:'Queued', RUNNING:'Running', SUCCEEDED:'Completed', FAILED:'Failed', CANCELLED:'Cancelled', RECOVERY_REQUIRED:'Needs reconciliation',
-  REVERTED:'Reverted', PARTIAL:'Partially reverted'
+  REVERTED:'Reverted', PARTIAL:'Partially reverted', NOT_RUN:'Not run'
 };
 const STATUS_SEMANTIC = {
   NEW:'info', MATCH:'success', MISMATCH:'warning', UNCHECKED:'info',
   QUEUED:'info', RUNNING:'info', SUCCEEDED:'success', FAILED:'error', CANCELLED:'warning', RECOVERY_REQUIRED:'error',
-  REVERTED:'success', PARTIAL:'warning'
+  REVERTED:'success', PARTIAL:'warning', NOT_RUN:'info'
 };
 function statusBadge(kind, value) {
   const span = document.createElement('span');

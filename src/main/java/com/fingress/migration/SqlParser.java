@@ -160,12 +160,19 @@ public final class SqlParser {
     public static Type catalogType(String type, int size, int scale, Dialect dialect) {
         String name = type.toUpperCase(Locale.ROOT);
         return switch (name) {
-            case "VARCHAR2", "VARCHAR", "CHARACTER VARYING" -> new Type("VARCHAR", size, null);
+            // PostgreSQL reports varchar declared without a length as size 0 or Integer.MAX_VALUE.
+            case "VARCHAR2", "VARCHAR", "CHARACTER VARYING" -> new Type("VARCHAR", size <= 0 || size == Integer.MAX_VALUE ? null : size, null);
+            case "FLOAT4", "REAL" -> new Type("REAL", null, null);
+            case "FLOAT8", "DOUBLE PRECISION" -> new Type("DOUBLE", null, null);
+            case "UUID" -> new Type("UUID", null, null);
+            case "JSONB" -> new Type("JSONB", null, null);
+            case "TIME", "TIME WITHOUT TIME ZONE" -> new Type("TIME", scale, null);
             case "CHAR", "BPCHAR", "CHARACTER" -> new Type("CHAR", size, null);
             case "NUMBER", "NUMERIC", "DECIMAL" -> new Type("DECIMAL", size <= 0 ? null : size, size <= 0 ? null : scale);
-            case "INT2", "SMALLINT" -> new Type("SMALLINT", null, null);
-            case "INT4", "INTEGER" -> new Type("INTEGER", null, null);
-            case "INT8", "BIGINT" -> new Type("BIGINT", null, null);
+            // The PostgreSQL driver names serial columns by their pseudo-type; the identity check vets the sequence.
+            case "INT2", "SMALLINT", "SMALLSERIAL", "SERIAL2" -> new Type("SMALLINT", null, null);
+            case "INT4", "INTEGER", "SERIAL", "SERIAL4" -> new Type("INTEGER", null, null);
+            case "INT8", "BIGINT", "BIGSERIAL", "SERIAL8" -> new Type("BIGINT", null, null);
             case "BOOLEAN", "BOOL" -> new Type("BOOLEAN", null, null);
             case "TEXT", "CLOB", "CHARACTER LARGE OBJECT" -> new Type("TEXT", null, null);
             case "BYTEA", "BLOB", "BINARY LARGE OBJECT", "BINARY VARYING" -> new Type("BINARY", null, null);

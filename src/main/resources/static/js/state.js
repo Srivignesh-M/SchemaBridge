@@ -5,7 +5,7 @@ const SchemaBridgeState = {
     currentStep: 1, maxStep: 1,
     databaseNames: {source: {}, target: {}},
     catalogSelection: {source:null, target:null},
-    catalogLoading: false, pendingRevert: null
+    catalogLoading: false, catalogLoaded: false, pendingRevert: null
   }
 };
 function invalidate() {

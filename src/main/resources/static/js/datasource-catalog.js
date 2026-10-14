@@ -14,21 +14,33 @@ function setCatalogMode(prefix, selection) {
   else document.getElementById('targetSchema').value = selection?.schema || (document.getElementById(prefix+'Dialect').value === 'ORACLE' ? 'APP' : 'public');
   invalidate();
 }
-async function loadCatalog() {
+function setCatalogStatus(text){for(const prefix of ['source','target'])document.getElementById(prefix+'CatalogStatus').textContent=text;}
+// silent: the automatic load when a connection form appears. It reports problems in the status line
+// instead of an error toast, because manual entry stays available either way.
+async function loadCatalog({silent=false}={}) {
   const m = SchemaBridgeState.migration;
   if (m.catalogLoading) return;
   m.catalogLoading = true;
   for(const prefix of ['source','target']) document.getElementById(prefix+'CatalogRefresh').disabled = true;
+  if(silent)setCatalogStatus('Loading LCNC datasources…');
   try {
     const result = await (await api('/datasources',undefined,'GET')).json();
-    if (!result.configured) throw new Error('LCNC catalogue is not configured. Manual entry remains available.');
+    m.catalogLoaded = true;
+    if (!result.configured) { setCatalogStatus('LCNC catalogue is not configured on this computer. Use manual entry.'); if(!silent)error('LCNC catalogue is not configured. Manual entry remains available.'); return; }
     for(const prefix of ['source','target']) {
       const select=document.getElementById(prefix+'Catalog'), selected=select.value; select.replaceChildren(new Option('Manual entry',''));
       for(const item of result.datasources) { const option=new Option(`${item.name} (#${item.id})${item.supported?' — '+item.dialect:' — '+item.finding}`,String(item.id)); option.disabled=!item.supported; option.title=item.description || ''; select.add(option); }
       select.value=selected;
       if (!select.value && m.catalogSelection[prefix]) setCatalogMode(prefix,null);
-      document.getElementById(prefix+'CatalogStatus').textContent = result.datasources.length+' active, approved master JDBC entries. Select one, then connect.';
+      document.getElementById(prefix+'CatalogStatus').textContent = `${result.datasources.length} LCNC datasource${result.datasources.length===1?'':'s'} available. Choose one to connect automatically, or keep manual entry.`;
     }
-  } catch(e) { error(e.message); }
+  } catch(e) { setCatalogStatus('Could not load LCNC datasources. Use manual entry, or refresh to try again.'); if(!silent)error(e.message); }
   finally { m.catalogLoading=false; for(const prefix of ['source','target']) document.getElementById(prefix+'CatalogRefresh').disabled = document.getElementById(prefix+'Connection').hidden; }
+}
+// Loads the catalogue once per session, as soon as a database connection form is on screen.
+function ensureCatalogLoaded(){
+  const m = SchemaBridgeState.migration;
+  if(m.catalogLoaded||m.catalogLoading||currentPageId()!=='migration')return;
+  if(document.getElementById('sourceConnection').hidden&&document.getElementById('targetConnection').hidden)return;
+  loadCatalog({silent:true});
 }

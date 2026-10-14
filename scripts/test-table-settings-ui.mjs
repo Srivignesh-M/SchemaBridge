@@ -5,6 +5,9 @@ const require=createRequire(new URL('../target/ui-test/package.json',import.meta
 const {JSDOM}=require('jsdom');
 const dom=new JSDOM(await readFile(new URL('../src/main/resources/static/index.html',import.meta.url),'utf8'),{url:'http://localhost:8098',runScripts:'outside-only'});
 const {window}=dom,requests=[];
+// jsdom does not implement HTMLDialogElement's modal API.
+window.HTMLDialogElement.prototype.showModal??=function(){this.open=true;};
+window.HTMLDialogElement.prototype.close??=function(){this.open=false;};
 const columns=[{name:{value:'id'},type:{kind:'INTEGER'}},{name:{value:'active'},type:{kind:'BOOLEAN'}}];
 window.fetch=async(path,options)=>{requests.push(path);return {ok:true,json:async()=>path.endsWith('/columns')?columns:path.endsWith('/jobs')?[]:{}};};
 const el=id=>window.document.getElementById(id);
@@ -54,8 +57,9 @@ try{
   el('sourceTables').options[0].selected=true;change(el('sourceTables'));
   assert.equal(window.readSelections().table_0.filters[0].value,'false');
   el('sourceTables').add(new window.Option('extra','extra',true,true));change(el('sourceTables'));
-  el('applyTablePicker').click();assert.match(lastError(),/500 source tables/);
-  console.log('Table settings UI passed: lazy loading, 500 selections, multiple typed filters, null checks, removal, limits, retained settings and 501 rejection.');
+  el('tablePicker').open=true;el('applyTablePicker').click();
+  assert.doesNotMatch(lastError(),/source tables/);assert.equal(el('tablePicker').open,false,'501 tables must be accepted and the picker closed');
+  console.log('Table settings UI passed: lazy loading, 500+ selections, multiple typed filters, null checks, removal, limits and retained settings.');
 
   // --- New: Columns/Filters/Row-limit must be independently collapsible <details> ---
   const group2 = window.document.querySelector('#columnOptions > details[data-table]');

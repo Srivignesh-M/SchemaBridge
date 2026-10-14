@@ -18,7 +18,13 @@ public final class Model {
     public record Type(String kind, Integer precision, Integer scale) {
         public String sql(Dialect dialect) {
             return switch (kind) {
-                case "VARCHAR" -> (dialect == Dialect.ORACLE ? "VARCHAR2" : "VARCHAR") + "(" + precision + (dialect == Dialect.ORACLE ? " CHAR" : "") + ")";
+                case "VARCHAR" -> precision == null ? postgresOnly(dialect, "VARCHAR")
+                        : (dialect == Dialect.ORACLE ? "VARCHAR2" : "VARCHAR") + "(" + precision + (dialect == Dialect.ORACLE ? " CHAR" : "") + ")";
+                case "REAL" -> postgresOnly(dialect, "REAL");
+                case "DOUBLE" -> postgresOnly(dialect, "DOUBLE PRECISION");
+                case "UUID" -> postgresOnly(dialect, "UUID");
+                case "JSONB" -> postgresOnly(dialect, "JSONB");
+                case "TIME" -> postgresOnly(dialect, "TIME(" + (precision == null ? 6 : precision) + ")");
                 case "CHAR" -> "CHAR(" + precision + (dialect == Dialect.ORACLE ? " CHAR" : "") + ")";
                 case "DECIMAL" -> (dialect == Dialect.ORACLE ? "NUMBER" : "NUMERIC") + (precision == null ? "" : "(" + precision + "," + (scale == null ? 0 : scale) + ")");
                 case "SMALLINT" -> dialect == Dialect.ORACLE ? "NUMBER(5,0)" : "SMALLINT";
@@ -33,9 +39,18 @@ public final class Model {
                 default -> throw new IllegalArgumentException("Unsupported data type: " + kind);
             };
         }
+        /** PostgreSQL-native types: carried over as-is to PostgreSQL, still blocked for Oracle targets. */
+        static final Set<String> POSTGRES_ONLY = Set.of("REAL", "DOUBLE", "UUID", "JSONB", "TIME");
+        private String postgresOnly(Dialect dialect, String sql) {
+            if (dialect != Dialect.POSTGRESQL) throw new IllegalArgumentException(describe() + " columns require an explicit Oracle mapping");
+            return sql;
+        }
+        private String describe() { return kind.equals("VARCHAR") ? "Unbounded varchar" : kind.equals("DOUBLE") ? "Double precision" : kind.charAt(0) + kind.substring(1).toLowerCase(Locale.ROOT); }
         public Type target(Dialect dialect) {
             if(kind.equals("BOOLEAN") && dialect==Dialect.ORACLE)throw new IllegalArgumentException("Boolean columns require an explicit Oracle mapping");
-            if (Set.of("TIMESTAMP", "TIMESTAMPTZ").contains(kind) && precision != null && (precision < 0 || precision > 6)) throw new IllegalArgumentException("Timestamp precision requires an explicit mapping to the supported 0-6 range");
+            if (Set.of("TIMESTAMP", "TIMESTAMPTZ", "TIME").contains(kind) && precision != null && (precision < 0 || precision > 6)) throw new IllegalArgumentException("Timestamp precision requires an explicit mapping to the supported 0-6 range");
+            if ((POSTGRES_ONLY.contains(kind) || kind.equals("VARCHAR") && precision == null) && dialect != Dialect.POSTGRESQL) postgresOnly(dialect, null);
+            if (kind.equals("VARCHAR") && precision == null) return this;
             if (Set.of("VARCHAR", "CHAR").contains(kind) && (precision == null || precision < 1 || precision > 10_485_760)) throw new IllegalArgumentException("Unbounded or oversized character types require an explicit mapping");
             if (dialect == Dialect.POSTGRESQL && kind.equals("DECIMAL") && precision != null && (precision > 1000 || precision < 1 || scale != null && Math.abs((long) scale) > 1000)) throw new IllegalArgumentException("Numeric precision/scale exceeds PostgreSQL limits");
             if (dialect == Dialect.ORACLE && Set.of("SMALLINT", "INTEGER", "BIGINT").contains(kind))
@@ -96,10 +111,25 @@ public final class Model {
     public record TableReport(String table, Status status, List<String> differences, List<String> warnings, long rows, List<Action> allowedActions, Long estimatedRows,
                               List<ColumnDifference> columnComparison, List<String> dependsOn) {}
     public record StatementReport(int number, String kind, String status, String convertedSql, List<String> messages) {}
+    /** A selected table left out of the plan, with the reason; execution skips it only after explicit confirmation. */
+    public record ExcludedTable(String table, String reason) {}
     public record PlanView(String id, Dialect sourceDialect, Dialect targetDialect, String targetSchema,
                            List<TableReport> tables, List<String> issues, List<String> warnings, boolean targetChecked, String expiresAt,
-                           boolean orderedScript, List<StatementReport> statements, boolean prepared, MigrationOptions options) {}
-    public record ExecuteRequest(ConnectionSpec target, Map<String, Action> actions) {}
+                           boolean orderedScript, List<StatementReport> statements, boolean prepared, MigrationOptions options,
+                           List<ExcludedTable> excluded, boolean automatic, Map<String, MigrationOptions> tableOptions) {
+        public PlanView {
+            excluded = excluded == null ? List.of() : List.copyOf(excluded);
+            tableOptions = tableOptions == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(tableOptions));
+        }
+        public PlanView(String id, Dialect sourceDialect, Dialect targetDialect, String targetSchema,
+                        List<TableReport> tables, List<String> issues, List<String> warnings, boolean targetChecked, String expiresAt,
+                        boolean orderedScript, List<StatementReport> statements, boolean prepared, MigrationOptions options) {
+            this(id, sourceDialect, targetDialect, targetSchema, tables, issues, warnings, targetChecked, expiresAt, orderedScript, statements, prepared, options, List.of(), false, Map.of());
+        }
+    }
+    public record ExecuteRequest(ConnectionSpec target, Map<String, Action> actions, boolean skipExcluded) {
+        public ExecuteRequest(ConnectionSpec target, Map<String, Action> actions) { this(target, actions, false); }
+    }
     /** Per-table validation detail (improvement-plan P4). method: FINGERPRINT (typed data: full-table
      * row count + order-independent SHA-256 content aggregate), ROW_COUNT (SQL-input: count only, not
      * fingerprinted), or NONE (validateData=false). rowsChecked is the full target table's row count
@@ -113,10 +143,12 @@ public final class Model {
      * on the next plan creation. This is a read-only preview; nothing is deleted by viewing it.
      * orphanedDirectories are work-directory entries with no matching tracked plan: per README, files
      * left behind by a killed process are not automatically recovered or removed. */
-    public record PlanStorage(String id, String state, long bytes, String expiresAt, boolean reclaimable) {}
+    public record PlanStorage(String id, String state, long bytes, String expiresAt, boolean reclaimable,
+                              String source, String target, int tables, boolean prepared, boolean active, boolean uncertain) {}
     public record StorageView(long stagedBytes, long freeDiskBytes, long reclaimableBytes, List<PlanStorage> plans, List<String> orphanedDirectories) {}
     public record Progress(String phase, String table, long rowsRead, long rowsSent, long rowsCommitted, long bytes,
-                           long totalRows, long elapsedSeconds, double rowsPerSecond, Long remainingSeconds, boolean cancelRequested) {}
+                           long totalRows, long elapsedSeconds, double rowsPerSecond, Long remainingSeconds, boolean cancelRequested,
+                           long tablesDone, long tablesTotal) {}
     public record RevertTable(String table, String action, long rows, String status) {}
     public record RevertView(String state, String message, List<RevertTable> tables, Progress progress) {}
     public record RevertPreview(String token, String jobId, String target, List<RevertTable> tables, String expiresAt) {}

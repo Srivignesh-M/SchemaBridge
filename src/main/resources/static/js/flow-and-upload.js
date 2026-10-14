@@ -6,6 +6,7 @@ function updateFlow() {
   for (const prefix of ['source','target']) document.getElementById(prefix + 'Connection').querySelectorAll('input,select,button').forEach(field => field.disabled = document.getElementById(prefix + 'Connection').hidden);
   document.getElementById('openTablePicker').disabled = !usesDatabase() || !document.getElementById('sourceSchemaSelect').value;
   invalidate();
+  ensureCatalogLoaded();
 }
 let uploadVersion = 0;
 async function loadSqlFiles(input) {

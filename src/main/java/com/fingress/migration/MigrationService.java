@@ -25,6 +25,17 @@ public class MigrationService implements AutoCloseable {
         String sourceInfo, targetInfo, sourceSchema, sourceTables;
         MigrationOptions options; boolean prepared=true;
         final Set<String> typed = new HashSet<>(); final Map<String,String> hashes = new LinkedHashMap<>();
+        final Map<String,String> excluded = new LinkedHashMap<>();
+        /** Per-table settings when the plan is automatic, keyed by target table name. */
+        final Map<String,MigrationOptions> tableOptions = new LinkedHashMap<>(); boolean auto;
+        MigrationOptions optionsFor(String table) { return tableOptions.getOrDefault(table, options); }
+    }
+    /** Leaves a table out of the plan, discarding anything already staged for it. */
+    private static void exclude(Plan plan, String name, String reason, Dialect target) throws IOException {
+        plan.excluded.put(name, reason);
+        plan.tables.removeIf(table -> table.name().in(target).equals(name));
+        Path data = plan.data.remove(name); if (data != null) Files.deleteIfExists(data);
+        plan.rows.remove(name); plan.typed.remove(name); plan.estimatedRows.remove(name); plan.tableOptions.remove(name);
     }
     static final class Job {
         String id = UUID.randomUUID().toString(), planId;
@@ -64,7 +75,6 @@ public class MigrationService implements AutoCloseable {
     private final ExecutorService preparer=Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"migration-preparation");t.setDaemon(true);return t;});
     private final DatabaseGateway db;
     private final Path work;
-    private final long maxRows;
     private final int maxPlans;
     private final Map<String, Plan> plans = new ConcurrentHashMap<>();
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
@@ -75,7 +85,8 @@ public class MigrationService implements AutoCloseable {
     private final ExecutorService canceller=new ThreadPoolExecutor(0,2,10,TimeUnit.SECONDS,new SynchronousQueue<>(),r->{Thread t=new Thread(r,"migration-cancel");t.setDaemon(true);return t;});
     public MigrationService(DatabaseGateway db, ObjectMapper json, @Value("${migration.work-dir:./work}") String work,
                             @Value("${migration.max-rows:2000000}") long maxRows, @Value("${migration.max-plans:30}") int maxPlans) throws IOException {
-        this.db = db; this.json = json; this.work = Path.of(work).toAbsolutePath().normalize(); this.maxRows = maxRows; this.maxPlans = maxPlans;
+        // maxRows is retained for callers; plans without explicit options are tuned automatically (AutoTuning).
+        this.db = db; this.json = json; this.work = Path.of(work).toAbsolutePath().normalize(); this.maxPlans = maxPlans;
         Files.createDirectories(this.work); planSlots=new java.util.concurrent.Semaphore(maxPlans);
         lockChannel=java.nio.channels.FileChannel.open(this.work.resolve(".owner.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE);
         java.nio.channels.FileLock acquired;
@@ -99,7 +110,8 @@ public class MigrationService implements AutoCloseable {
         if (request.targetSchema() == null || request.targetSchema().isBlank() || request.targetSchema().length() > 128) throw new IllegalArgumentException("Enter the target schema name");
         if (request.source() != null && request.sql() != null && !request.sql().isBlank()) throw new IllegalArgumentException("Choose a database source or SQL input, not both");
         String id = UUID.randomUUID().toString(); Plan plan = new Plan(); plan.directory = Files.createDirectory(work.resolve(id));
-        plan.options=request.options()==null?MigrationOptions.defaults(maxRows):request.options();
+        plan.auto=request.options()==null;
+        plan.options=plan.auto?AutoTuning.global(work,request.targetDialect()):request.options();
         plan.prepared=!request.metadataOnly(); DatabaseGateway.configure(plan.options);
         plan.sourceInfo = connectionDescription(request.source(), "SQL input (database name not supplied)");
         plan.targetInfo = connectionDescription(request.target(), "Download only (database name not supplied)");
@@ -116,10 +128,14 @@ public class MigrationService implements AutoCloseable {
             List<TableReport> reports = new ArrayList<>();
             if (request.target() != null) {
                 if (request.target().dialect() != request.targetDialect()) throw new IllegalArgumentException("Target connection type differs from selected target dialect");
+                TransferProgress progress = preparing.get() == null ? new TransferProgress() : preparing.get();
                 try (Connection connection = db.connect(request.target())) {
                     db.requireSchema(connection, request.targetSchema());
+                    if (request.source() != null) excludeMissingParents(plan, request, connection);
+                    progress.tables("COMPARING_TARGET", plan.tables.size());
                     for (Table table : plan.tables) {
                         String name = table.name().in(request.targetDialect());
+                        progress.check(); progress.table = name;
                         try {
                             Table actual = db.inspect(connection, request.targetSchema(), name, request.targetDialect());
                             if (actual == null) reports.add(report(table, request.targetDialect(), Status.NEW, List.of(), plan, List.of(Action.CREATE_AND_LOAD, Action.SKIP)));
@@ -138,22 +154,26 @@ public class MigrationService implements AutoCloseable {
                         } catch (IllegalArgumentException e) {
                             reports.add(report(table, request.targetDialect(), Status.MISMATCH, List.of(e.getMessage()), plan, List.of(Action.SKIP)));
                         }
+                        progress.tablesDone++;
                     }
                     if(plan.script==null || !plan.script.ordered()) dependencies(plan, request, connection, issues);
                 }
                 plan.targetIdentity = identity(request.target());
             } else {
+                if (request.source() != null) excludeMissingParents(plan, request, null);
                 for (Table table : plan.tables) reports.add(report(table, request.targetDialect(), Status.UNCHECKED, List.of("Target has not been inspected; download only"), plan, List.of(Action.CREATE_AND_LOAD, Action.SKIP)));
                 if(plan.script==null || !plan.script.ordered()) dependencies(plan, request, null, issues);
             }
-            if (plan.tables.isEmpty()) issues.add("No supported table definitions were found");
+            if (plan.tables.isEmpty()) issues.add(plan.excluded.isEmpty() ? "No supported table definitions were found" : "None of the selected tables can be migrated; see the excluded tables");
             if (request.sourceDialect() != request.targetDialect()) warnings.add("Cross-database character, collation, timezone and numeric semantics require validation with representative data before production use.");
+            if (plan.auto) plan.options = AutoTuning.withReadTimeout(plan.options, plan.tableOptions.values());
             boolean ordered=plan.script!=null&&plan.script.ordered();
             if(ordered){warnings.removeIf(w->w.startsWith("Execution uses insert-only"));warnings.add("Ordered script conversion: ALTER, UPDATE, DELETE, MERGE and administrative statements retain their original order. Download the review script; per-table DML-only execution is unavailable for this lifecycle script.");}
-            plan.view = new PlanView(id, request.sourceDialect(), request.targetDialect(), request.targetSchema(), List.copyOf(reports), List.copyOf(new LinkedHashSet<>(issues)), List.copyOf(warnings), request.target() != null, Instant.now().plusSeconds(2592000).toString(),ordered,plan.script==null?List.of():plan.script.statements(),plan.prepared,plan.options);
+            plan.view = new PlanView(id, request.sourceDialect(), request.targetDialect(), request.targetSchema(), List.copyOf(reports), List.copyOf(new LinkedHashSet<>(issues)), List.copyOf(warnings), request.target() != null, Instant.now().plusSeconds(2592000).toString(),ordered,plan.script==null?List.of():plan.script.statements(),plan.prepared,plan.options,
+                    plan.excluded.entrySet().stream().map(e -> new ExcludedTable(e.getKey(), e.getValue())).toList(), plan.auto, plan.tableOptions);
             try(var files=Files.list(plan.directory)){for(Path file:files.filter(Files::isRegularFile).toList())plan.hashes.put(file.getFileName().toString(),RowStore.hash(file));}
             persistPlan(plan); plans.put(id, plan); return plan.view;
-        } catch (Exception error) { erase(plan.directory); throw error; }
+        } catch (Exception | OutOfMemoryError error) { erase(plan.directory); throw error; }
     }
     private void fromSql(PlanRequest request, Plan plan, List<String> issues) throws IOException {
         if (request.sql() == null || request.sql().length() > 10_000_000) throw new IllegalArgumentException("Provide SQL up to 10 MB");
@@ -179,15 +199,17 @@ public class MigrationService implements AutoCloseable {
     }
     private void fromDatabase(PlanRequest request, Plan plan, List<String> issues) throws Exception {
         if (request.source().dialect() != request.sourceDialect()) throw new IllegalArgumentException("Source connection type differs from selected source dialect");
-        if (request.tables() == null || request.tables().isEmpty() || request.tables().size() > 500) throw new IllegalArgumentException("Select between 1 and 500 source tables");
+        if (request.tables() == null || request.tables().isEmpty()) throw new IllegalArgumentException("Select at least one source table");
         if (request.sourceSchema() == null || request.sourceSchema().isBlank()) throw new IllegalArgumentException("Select the source schema");
         try (Connection connection = db.connect(request.source())) {
             db.snapshot(connection, request.sourceDialect()); long remaining = plan.options.maxRows();
             TransferProgress progress=preparing.get();if(progress==null)progress=new TransferProgress();
-            progress.phase="EXTRACTING";
+            Set<String> tables=new LinkedHashSet<>(request.tables());
+            progress.tables(plan.prepared?"EXTRACTING":"READING_DEFINITIONS",tables.size());
             Map<String,TableSelection> selections=request.selections()==null?Map.of():request.selections();
-            if(!new HashSet<>(request.tables()).containsAll(selections.keySet()))throw new IllegalArgumentException("Selection references an unselected table");
-            for (String selected : new LinkedHashSet<>(request.tables())) {
+            if(!tables.containsAll(selections.keySet()))throw new IllegalArgumentException("Selection references an unselected table");
+            for (String selected : tables) {
+                progress.check();progress.table=selected;Path path=null;
                 try {
                     Table source = db.inspect(connection, request.sourceSchema(), selected, request.sourceDialect());
                     if (source == null) throw new IllegalArgumentException("Source table not found: " + selected);
@@ -206,8 +228,12 @@ public class MigrationService implements AutoCloseable {
                     Table table = new Table(TableProjection.renameTable(source.name(),selection,request.sourceDialect()), converted, TableProjection.keys(source,selection,selections,request.sourceDialect()), source.warnings());
                     String name = table.name().in(request.targetDialect());
                     if (plan.data.containsKey(name)) throw new IllegalArgumentException("Duplicate mapped table name: " + name);
-                    Path path = plan.directory.resolve("data-" + plan.data.size() + ".rows");
-                    long rows = request.includeData() && plan.prepared ? db.exportTyped(connection,source,filterTable,selection,request.sourceSchema(),request.sourceDialect(),request.targetDialect(),path,remaining,plan.options,progress) : 0;
+                    path = plan.directory.resolve("data-" + plan.data.size() + ".rows");
+                    // Each table's settings are fixed here and reused for reading, loading, verifying and reverting it.
+                    MigrationOptions tableOptions = plan.auto
+                            ? AutoTuning.forTable(plan.options, db.tableStats(connection, request.sourceSchema(), selected, request.sourceDialect()), Runtime.getRuntime().maxMemory(), DatabaseGateway.largeValues(source))
+                            : AutoTuning.withFetchSize(plan.options, DatabaseGateway.fetchSize(source, plan.options));
+                    long rows = request.includeData() && plan.prepared ? db.exportTyped(connection,source,filterTable,selection,request.sourceSchema(),request.sourceDialect(),request.targetDialect(),path,remaining,tableOptions,progress) : 0;
                     if (!request.includeData() || !plan.prepared) Files.createFile(path);
                     if(!plan.prepared&&(selection==null||selection.filters()==null||selection.filters().isEmpty())){
                         Long estimate=db.estimateRows(connection,request.sourceSchema(),selected,request.sourceDialect());
@@ -215,7 +241,16 @@ public class MigrationService implements AutoCloseable {
                     }
                     plan.typed.add(name);
                     remaining -= rows; plan.tables.add(table); plan.data.put(name, path); plan.rows.put(name, rows);
-                } catch (IllegalArgumentException e) { issues.add(selected + ": " + e.getMessage()); }
+                    plan.tableOptions.put(name, tableOptions);
+                } catch (IllegalArgumentException e) {
+                    // The next table reuses this file name, so a partial export must not be left behind.
+                    if (path != null) Files.deleteIfExists(path);
+                    if (e instanceof DatabaseGateway.RowsTooLarge) throw e;
+                    if (e instanceof DatabaseGateway.RowLimitExceeded) throw new IllegalArgumentException("The selected tables contain more than "
+                            + String.format("%,d", plan.options.maxRows()) + " rows in total, the row limit for this plan. Select fewer tables or rows.");
+                    plan.excluded.put(selected, e.getMessage());
+                }
+                progress.tablesDone++;
             }
             connection.rollback();
         }
@@ -227,6 +262,35 @@ public class MigrationService implements AutoCloseable {
         String name=table.name().in(dialect);
         List<String> dependsOn = table.keys().stream().filter(k -> k.kind().equals("FOREIGN KEY")).map(k -> k.reference().in(dialect)).distinct().toList();
         return new TableReport(name, status, List.copyOf(diff), table.warnings(), plan.rows.getOrDefault(name, 0L), actions, plan.estimatedRows.get(name), columnComparison, dependsOn);
+    }
+    /** Excludes tables whose foreign-key parent is neither planned nor already in the target, repeating
+     * until stable because excluding a parent can strand its own children. Database sources only. */
+    private void excludeMissingParents(Plan plan, PlanRequest request, Connection connection) throws Exception {
+        Dialect target = request.targetDialect(); Map<String, Boolean> inTarget = new HashMap<>();
+        boolean changed;
+        do {
+            changed = false;
+            for (Table table : List.copyOf(plan.tables)) {
+                String name = table.name().in(target);
+                for (Key key : table.keys()) {
+                    if (!key.kind().equals("FOREIGN KEY")) continue;
+                    String parent = key.reference().in(target);
+                    if (plan.tables.stream().anyMatch(t -> t.name().in(target).equals(parent))) continue;
+                    if (connection != null) {
+                        if (!inTarget.containsKey(parent)) {
+                            boolean exists;
+                            // A parent the inspector cannot describe still exists, so the foreign key can be created.
+                            try { exists = db.inspect(connection, request.targetSchema(), parent, target) != null; } catch (IllegalArgumentException e) { exists = true; }
+                            inTarget.put(parent, exists);
+                        }
+                        if (inTarget.get(parent)) continue;
+                    }
+                    exclude(plan, name, plan.excluded.containsKey(parent) ? "References " + parent + ", which cannot be migrated"
+                            : "References " + parent + ", which is neither selected nor in the target schema", target);
+                    changed = true; break;
+                }
+            }
+        } while (changed);
     }
     private void dependencies(Plan plan, PlanRequest request, Connection connection, List<String> issues) throws SQLException {
         for (Table table : plan.tables) for (Key key : table.keys()) if (key.kind().equals("FOREIGN KEY")) {
@@ -336,6 +400,7 @@ public class MigrationService implements AutoCloseable {
             for (TableResult result : job.view().tables()) info.append(result.table()).append(" | ").append(result.action()).append(" | ").append(result.status()).append(" | Committed rows: ").append(result.rows()).append(" | ").append(result.message()).append('\n');
         }
         info.append("\nIssues:\n"); plan.view.issues().forEach(issue -> info.append("- ").append(issue).append('\n'));
+        if (!plan.view.excluded().isEmpty()) { info.append("\nExcluded tables (not in this package):\n"); plan.view.excluded().forEach(t -> info.append("- ").append(t.table()).append(": ").append(t.reason()).append('\n')); }
         info.append("\nWarnings:\n"); plan.view.warnings().forEach(warning -> info.append("- ").append(warning).append('\n'));
         return info.append("\nCredentials are excluded. Read README.txt for execution order. Review report.json for statement-level details.\n").toString();
     }
@@ -345,6 +410,8 @@ public class MigrationService implements AutoCloseable {
         if(plan.view.orderedScript())throw new IllegalArgumentException("This is an ordered lifecycle script. Download and review it; the table-cloning executor cannot safely reorder its mutations");
         if (!plan.view.targetChecked()) throw new IllegalArgumentException("Inspect the target connection before execution");
         if (!plan.view.issues().isEmpty()) throw new IllegalArgumentException("Resolve plan issues before execution");
+        int excluded = plan.view.excluded().size();
+        if (excluded > 0 && !request.skipExcluded()) throw new IllegalArgumentException(excluded + " selected table" + (excluded == 1 ? "" : "s") + " cannot be migrated. Review the excluded tables and confirm skipping them to migrate the rest.");
         if (request.target() == null || !Objects.equals(identity(request.target()), plan.targetIdentity)) throw new IllegalArgumentException("Target connection differs from the inspected target; analyse again");
         Map<String, Action> actions = validateActions(plan, request.actions()); ordered(plan, actions);
         if (!plan.executed.compareAndSet(false, true)) throw new IllegalArgumentException("This plan has already been submitted. Analyse again to avoid replaying committed data");
@@ -427,7 +494,7 @@ public class MigrationService implements AutoCloseable {
                             ValidationReport validation=loadTable(connection,plan,table,job);
                             // New SQL-input tables have no typed source rows. Keep a compact receipt
                             // of their actual values so a later revert can verify the entire table.
-                            if(job.created.contains(active))job.createdFingerprints.put(active,DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.options,job.progress));
+                            if(job.created.contains(active))job.createdFingerprints.put(active,DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.optionsFor(active),job.progress));
                             job.progress.check();risky=true;connection.commit();
                             job.committed.add(active);job.validations.put(active,validation);job.progress.rowsCommitted+=plan.rows.getOrDefault(active,0L);
                             checkpoint(plan,job);risky=false;
@@ -435,19 +502,21 @@ public class MigrationService implements AutoCloseable {
                         for(Table table:plan.tables){
                             active=table.name().in(plan.view.targetDialect());if(actions.get(active)==Action.SKIP||job.finalized.contains(active))continue;
                             job.progress.check();job.progress.table=active;job.progress.phase="FINALIZING";checkpoint(plan,job);
+                            // Index and constraint builds scale with the table, so they get its timeout.
+                            statement.setQueryTimeout(plan.optionsFor(active).queryTimeoutSeconds());
                             risky=plan.view.targetDialect()==Dialect.ORACLE||!identitySql(table,plan).isEmpty();job.progress.statement=statement;
                             for(String sql:identitySql(table,plan))statement.execute(sql);
                             if(actions.get(active)==Action.CREATE_AND_LOAD)for(String sql:SqlWriter.afterData(table,plan.view.targetSchema(),plan.view.targetDialect()))statement.execute(sql);
                             risky=true;connection.commit();job.finalized.add(active);checkpoint(plan,job);risky=false;
                         }
-                    }catch(Exception failure){try{connection.rollback();}catch(SQLException rollback){risky=true;}throw failure;}
+                    }catch(Exception|OutOfMemoryError failure){try{connection.rollback();}catch(SQLException rollback){risky=true;}throw failure;}
                 }
             }
             outcome="SUCCEEDED";job.message="Completed. Validation and committed-row counts are included for every selected table.";
-        }catch(Exception failure){
+        }catch(Exception|OutOfMemoryError failure){
             job.uncertain=risky;
             outcome=risky?"RECOVERY_REQUIRED":job.progress.cancel||failure instanceof CancellationException?"CANCELLED":"FAILED";
-            job.message=risky?"A DDL or commit outcome is uncertain. Automatic replay is disabled; inspect the target and reconcile.":failure instanceof SQLException sql?DatabaseErrorGuidance.describe(sql)+" Current table rolled back; earlier commits remain.":failure instanceof IllegalArgumentException?failure.getMessage():outcome.equals("CANCELLED")?"Cancelled. Current transaction rolled back; earlier committed tables are retained.":"Operation failed. Check local disk, artifacts and database access. Earlier committed tables remain.";
+            job.message=risky?"A DDL or commit outcome is uncertain. Automatic replay is disabled; inspect the target and reconcile.":failure instanceof OutOfMemoryError?outOfMemory(active)+" Current table rolled back; earlier commits remain.":failure instanceof SQLException sql?DatabaseErrorGuidance.describe(sql)+" Current table rolled back; earlier commits remain.":failure instanceof IllegalArgumentException?failure.getMessage():outcome.equals("CANCELLED")?"Cancelled. Current transaction rolled back; earlier committed tables are retained.":"Operation failed. Check local disk, artifacts and database access. Earlier committed tables remain.";
         }finally{
           synchronized(this){
             job.progress.statement=null;job.progress.finished=System.currentTimeMillis();job.state=outcome;job.progress.phase=outcome;job.tables.clear();
@@ -473,37 +542,37 @@ public class MigrationService implements AutoCloseable {
         };
     }
     private ValidationReport loadTable(Connection connection,Plan plan,Table table,Job job)throws Exception {
-        String name=table.name().in(plan.view.targetDialect());Path file=plan.data.get(name);long rows=0;
+        String name=table.name().in(plan.view.targetDialect());Path file=plan.data.get(name);long rows=0;MigrationOptions options=plan.optionsFor(name);
         DataFingerprint before=null,expected=null;long beforeCount=0;
-        if(plan.options.validateData()){
+        if(options.validateData()){
             job.progress.phase="VALIDATING_BASELINE";
-            if(plan.typed.contains(name)){before=DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.options,job.progress);expected=DataFingerprint.staged(file,table,job.progress);}
+            if(plan.typed.contains(name)){before=DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),options,job.progress);expected=DataFingerprint.staged(file,table,job.progress);}
             else beforeCount=count(connection,plan,table,job.progress);
         }
         job.progress.phase="LOADING";
         if(plan.typed.contains(name)){
-            if(plan.options.useCopy()&&plan.view.targetDialect()==Dialect.POSTGRESQL&&connection.getMetaData().getDatabaseProductName().equals("PostgreSQL"))
-                {try(Statement timeout=connection.createStatement()){timeout.execute("SET LOCAL statement_timeout = '"+plan.options.queryTimeoutSeconds()+"s'");}rows=CopyLoader.load(connection,file,table,plan.view.targetSchema(),job.progress);}
+            if(options.useCopy()&&plan.view.targetDialect()==Dialect.POSTGRESQL&&connection.getMetaData().getDatabaseProductName().equals("PostgreSQL"))
+                {try(Statement timeout=connection.createStatement()){timeout.execute("SET LOCAL statement_timeout = '"+options.queryTimeoutSeconds()+"s'");}rows=CopyLoader.load(connection,file,table,plan.view.targetSchema(),job.progress);}
             else try(PreparedStatement statement=connection.prepareStatement(RowStore.insertSql(table,plan.view.targetSchema(),plan.view.targetDialect()));BufferedReader reader=Files.newBufferedReader(file)){
-                statement.setQueryTimeout(plan.options.queryTimeoutSeconds());job.progress.statement=statement;List<Closeable> streams=new ArrayList<>();int batch=0;long bytes=0;
+                statement.setQueryTimeout(options.queryTimeoutSeconds());job.progress.statement=statement;List<Closeable> streams=new ArrayList<>();int batch=0;long bytes=0;
                 try{String line;while((line=reader.readLine())!=null){job.progress.check();RowStore.Cell[] row=RowStore.JSON.readValue(line,RowStore.Cell[].class);
                     RowStore.bind(statement,row,table,plan.view.targetDialect(),file.getParent(),streams);statement.addBatch();batch++;rows++;bytes+=line.length()*2L;
-                    if(batch>=plan.options.batchRows()||bytes>=plan.options.batchBytes()||!streams.isEmpty()){statement.executeBatch();statement.clearBatch();job.progress.rowsSent+=batch;job.progress.bytes+=bytes;batch=0;bytes=0;closeStreams(streams);}
+                    if(batch>=options.batchRows()||bytes>=options.batchBytes()||!streams.isEmpty()){statement.executeBatch();statement.clearBatch();job.progress.rowsSent+=batch;job.progress.bytes+=bytes;batch=0;bytes=0;closeStreams(streams);}
                 }if(batch>0){statement.executeBatch();statement.clearBatch();job.progress.rowsSent+=batch;job.progress.bytes+=bytes;}}
                 finally{closeStreams(streams);}
             }
         }else try(Statement statement=connection.createStatement();BufferedReader reader=Files.newBufferedReader(file)){
-            statement.setQueryTimeout(plan.options.queryTimeoutSeconds());job.progress.statement=statement;String line;int batch=0;long bytes=0;
+            statement.setQueryTimeout(options.queryTimeoutSeconds());job.progress.statement=statement;String line;int batch=0;long bytes=0;
             while((line=reader.readLine())!=null){job.progress.check();statement.addBatch(JsonLines.decode(line));batch++;rows++;bytes+=line.length()*2L;
-                if(batch>=plan.options.batchRows()||bytes>=plan.options.batchBytes()){statement.executeBatch();statement.clearBatch();job.progress.rowsSent+=batch;job.progress.bytes+=bytes;batch=0;bytes=0;}}
+                if(batch>=options.batchRows()||bytes>=options.batchBytes()){statement.executeBatch();statement.clearBatch();job.progress.rowsSent+=batch;job.progress.bytes+=bytes;batch=0;bytes=0;}}
             if(batch>0){statement.executeBatch();statement.clearBatch();job.progress.rowsSent+=batch;job.progress.bytes+=bytes;}
         }
         if(rows!=plan.rows.getOrDefault(name,0L))throw new IOException("Staged row count changed");
-        if(!plan.options.validateData())return new ValidationReport("NONE",0,0,"PASSED","Validation disabled by user.");
+        if(!options.validateData())return new ValidationReport("NONE",0,0,"PASSED","Validation disabled by user.");
         job.progress.phase="VALIDATING";
         long validationStart=System.nanoTime();
         if(plan.typed.contains(name)){
-            DataFingerprint after=DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.options,job.progress);
+            DataFingerprint after=DataFingerprint.target(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),options,job.progress);
             if(!after.equals(before.plus(expected)))throw new IllegalArgumentException("Target content validation failed; transaction will roll back");
             return new ValidationReport("FINGERPRINT",after.count(),(System.nanoTime()-validationStart)/1e9,"PASSED",null);
         }
@@ -513,7 +582,7 @@ public class MigrationService implements AutoCloseable {
     }
     private static void closeStreams(List<Closeable> streams)throws IOException{IOException failure=null;for(Closeable stream:streams)try{stream.close();}catch(IOException e){failure=e;}streams.clear();if(failure!=null)throw failure;}
     private long count(Connection connection,Plan plan,Table table,TransferProgress progress)throws SQLException{
-        try(Statement s=connection.createStatement()){progress.statement=s;s.setQueryTimeout(plan.options.queryTimeoutSeconds());try(ResultSet rs=s.executeQuery("SELECT COUNT(*) FROM "+qualified(plan.view.targetSchema(),table.name(),plan.view.targetDialect()))){rs.next();return rs.getLong(1);}}
+        try(Statement s=connection.createStatement()){progress.statement=s;s.setQueryTimeout(plan.optionsFor(table.name().in(plan.view.targetDialect())).queryTimeoutSeconds());try(ResultSet rs=s.executeQuery("SELECT COUNT(*) FROM "+qualified(plan.view.targetSchema(),table.name(),plan.view.targetDialect()))){rs.next();return rs.getLong(1);}}
     }
     private List<String> identitySql(Table table, Plan plan) {
         if (plan.rows.getOrDefault(table.name().in(plan.view.targetDialect()), 0L) == 0) return List.of();
@@ -575,9 +644,9 @@ public class MigrationService implements AutoCloseable {
                 DataFingerprint saved=r!=null&&r.rowsRemoved?DataFingerprint.empty():job.createdFingerprints.get(name);
                 if(saved==null)saved=DataFingerprint.staged(plan.data.get(name),table,progress);
                 if((r==null||!r.rowsRemoved)&&saved.count()!=plan.rows.getOrDefault(name,0L))throw new IllegalArgumentException("Revert receipt row count differs for "+name);
-                if(!saved.equals(DataFingerprint.target(connection,table,schema,dialect,plan.options,progress)))throw new IllegalArgumentException("Revert blocked: newly created table "+name+" contains changed or additional data");
+                if(!saved.equals(DataFingerprint.target(connection,table,schema,dialect,plan.optionsFor(name),progress)))throw new IllegalArgumentException("Revert blocked: newly created table "+name+" contains changed or additional data");
             }else if(r==null||!r.rowsRemoved){
-                if(RevertRows.existing(connection,table,schema,dialect,plan.data.get(name),plan.options,progress,false)!=plan.rows.getOrDefault(name,0L))throw new IllegalArgumentException("Revert row receipt changed for "+name);
+                if(RevertRows.existing(connection,table,schema,dialect,plan.data.get(name),plan.optionsFor(name),progress,false)!=plan.rows.getOrDefault(name,0L))throw new IllegalArgumentException("Revert row receipt changed for "+name);
             }
         }
         RevertRows.dependencies(connection,schema,tables,dropping,dialect);
@@ -633,10 +702,10 @@ public class MigrationService implements AutoCloseable {
                     r.progress.check();String name=table.name().in(plan.view.targetDialect());r.progress.table=name;long rows;
                     if(job.created.contains(name)){
                         try(Statement s=connection.createStatement()){
-                            s.setQueryTimeout(plan.options.queryTimeoutSeconds());r.progress.statement=s;
+                            s.setQueryTimeout(plan.optionsFor(name).queryTimeoutSeconds());r.progress.statement=s;
                             rows=s.executeLargeUpdate("DELETE FROM "+qualified(plan.view.targetSchema(),table.name(),plan.view.targetDialect()));r.progress.rowsSent+=rows;
                         }
-                    }else rows=RevertRows.existing(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.data.get(name),plan.options,r.progress,true);
+                    }else rows=RevertRows.existing(connection,table,plan.view.targetSchema(),plan.view.targetDialect(),plan.data.get(name),plan.optionsFor(name),r.progress,true);
                     if(rows!=plan.rows.getOrDefault(name,0L))throw new IllegalArgumentException("Revert row count changed for "+name);
                 }
                 r.progress.check();risky=true;connection.commit();r.rowsRemoved=true;r.progress.rowsCommitted=r.progress.totalRows;checkpoint(plan,job);risky=false;
@@ -692,9 +761,14 @@ public class MigrationService implements AutoCloseable {
             DatabaseGateway.configureBackground(true);
             preparing.set(preparation.progress);preparation.state="PREPARING";preparation.message="Reading source and preparing an immutable export";
             try{preparation.progress.check();preparation.result=create(request);preparation.state="READY";preparation.message="Prepared for review";}
-            catch(Exception failure){preparation.state=preparation.progress.cancel?"CANCELLED":"FAILED";preparation.message=failure instanceof IllegalArgumentException?failure.getMessage():"Preparation failed. Check source access, limits and disk space.";}
+            catch(Exception failure){preparation.state=preparation.progress.cancel?"CANCELLED":"FAILED";preparation.message=failure instanceof IllegalArgumentException?failure.getMessage():failure instanceof SQLException sql?DatabaseErrorGuidance.describe(sql):"Preparation failed. Check source access, limits and disk space.";}
+            // The staged rows are released by now, so record the outcome instead of leaving the preparation stuck.
+            catch(OutOfMemoryError failure){preparation.state="FAILED";preparation.message=outOfMemory(preparation.progress.table);}
             finally{preparation.progress.finished=System.currentTimeMillis();preparing.remove();DatabaseGateway.configureBackground(false);}
         });return preparation.view();
+    }
+    static String outOfMemory(String table){
+        return "Ran out of memory"+(table==null||table.isBlank()?"":" on "+table)+". Start SchemaBridge with more memory (-Xmx) and try again.";
     }
     public PreparationView preparation(String id){Preparation p=preparations.get(id);if(p==null)throw new IllegalArgumentException("Preparation not found");return p.view();}
     public PreparationView cancelPreparation(String id){Preparation p=preparations.get(id);if(p==null)throw new IllegalArgumentException("Preparation not found");requestCancel(p.progress);return p.view();}
@@ -750,7 +824,7 @@ public class MigrationService implements AutoCloseable {
                 try{
                     PlanManifest saved=json.readValue(Files.readAllBytes(manifest),PlanManifest.class);
                     if(saved.version()!=1||!saved.view().id().equals(directory.getFileName().toString()))continue;
-                    Plan plan=new Plan();plan.directory=directory;plan.view=saved.view();plan.prepared=plan.view.prepared();plan.options=saved.options()==null?plan.view.options():saved.options();plan.tables.addAll(saved.tables());
+                    Plan plan=new Plan();plan.directory=directory;plan.view=saved.view();plan.prepared=plan.view.prepared();plan.options=saved.options()==null?plan.view.options():saved.options();plan.auto=plan.view.automatic();plan.tableOptions.putAll(plan.view.tableOptions());plan.tables.addAll(saved.tables());
                     for(var entry:saved.data().entrySet())plan.data.put(entry.getKey(),artifact(directory,entry.getValue()));
                     plan.targetTables.putAll(saved.targetTables());plan.rows.putAll(saved.rows());plan.typed.addAll(saved.typed());plan.hashes.putAll(saved.hashes());
                     plan.targetIdentity=saved.targetIdentity();plan.sourceInfo=saved.sourceInfo();plan.targetInfo=saved.targetInfo();plan.sourceSchema=saved.sourceSchema();plan.sourceTables=saved.sourceTables();plan.jobId=saved.jobId();plan.executed.set(saved.executed());
@@ -803,9 +877,12 @@ public class MigrationService implements AutoCloseable {
         if (active(plan)) throw new IllegalArgumentException("Wait for this job before deleting its plan");
         Job savedJob=plan.jobId==null?null:jobs.get(plan.jobId);
         if(!acknowledgeUncertain&&savedJob!=null&&savedJob.state.equals("RECOVERY_REQUIRED"))throw new IllegalArgumentException("This job's commit outcome is uncertain. Reconcile the target first, or confirm you have reviewed it before discarding its evidence.");
-        if(!acknowledgeUncertain&&savedJob!=null&&savedJob.revert!=null&&Set.of("PARTIAL","RECOVERY_REQUIRED").contains(savedJob.revert.state))throw new IllegalArgumentException("Retain this job's files until its revert has been reconciled, or confirm you have reviewed it before discarding its evidence.");
+        if(!acknowledgeUncertain&&uncertainRevert(savedJob))throw new IllegalArgumentException("Retain this job's files until its revert has been reconciled, or confirm you have reviewed it before discarding its evidence.");
         plans.remove(id); if (plan.jobId != null) jobs.remove(plan.jobId); erase(plan.directory);
     }
+    private static boolean uncertainRevert(Job job){return job!=null&&job.revert!=null&&Set.of("PARTIAL","RECOVERY_REQUIRED").contains(job.revert.state);}
+    /** Mirrors delete(): files that ordinary deletion refuses to discard without acknowledgement. */
+    private static boolean uncertain(Job job){return job!=null&&(job.state.equals("RECOVERY_REQUIRED")||uncertainRevert(job));}
     public synchronized StorageView storage() throws IOException {
         List<PlanStorage> details = new ArrayList<>(); long totalBytes = 0, reclaimable = 0;
         Set<String> known = new HashSet<>();
@@ -815,8 +892,10 @@ public class MigrationService implements AutoCloseable {
             boolean expiredInactive = Instant.parse(plan.view.expiresAt()).isBefore(Instant.now()) && !active(plan) && !plan.executed.get();
             if (expiredInactive) reclaimable += bytes;
             Job job = plan.jobId == null ? null : jobs.get(plan.jobId);
-            details.add(new PlanStorage(plan.view.id(), job == null ? "NOT_RUN" : job.state, bytes, plan.view.expiresAt(), expiredInactive));
+            details.add(new PlanStorage(plan.view.id(), job == null ? "NOT_RUN" : job.state, bytes, plan.view.expiresAt(), expiredInactive,
+                    plan.sourceInfo, plan.targetInfo, plan.view.tables().size(), plan.prepared, active(plan), uncertain(job)));
         }
+        details.sort(Comparator.comparing(PlanStorage::expiresAt).reversed());
         List<String> orphans = new ArrayList<>();
         if (Files.isDirectory(work)) try (var entries = Files.list(work)) {
             for (Path entry : entries.filter(Files::isDirectory).toList()) if (!known.contains(entry.getFileName().toString())) orphans.add(entry.getFileName().toString());

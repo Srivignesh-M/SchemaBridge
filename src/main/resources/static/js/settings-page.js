@@ -2,8 +2,7 @@ function settingsProfile(){
   const value=id=>document.getElementById(id)?document.getElementById(id).value:undefined;
   return {version:1,sourceDialect:value('sourceDialect'),targetDialect:value('targetDialect'),targetSchema:value('targetSchema'),
     source:{host:value('sourceHost'),port:value('sourcePort'),database:value('sourceDatabase'),username:value('sourceUsername')},
-    target:{host:value('targetHost'),port:value('targetPort'),database:value('targetDatabase'),username:value('targetUsername')},
-    options:{maxRows:value('maxRows'),maxTableGb:value('maxTableGb'),diskReserveMb:value('diskReserveMb'),fetchSize:value('fetchSize'),batchRows:value('batchRows'),batchMb:value('batchMb'),queryTimeout:value('queryTimeout'),readTimeout:value('readTimeout'),validateData:document.getElementById('validateData')?.checked,useCopy:document.getElementById('useCopy')?.checked}};
+    target:{host:value('targetHost'),port:value('targetPort'),database:value('targetDatabase'),username:value('targetUsername')}};
 }
 document.getElementById('exportSettings').addEventListener('click',()=>{save(new Blob([JSON.stringify(settingsProfile(),null,2)],{type:'application/json'}),'schemabridge-settings.json');});
 document.getElementById('importSettings').addEventListener('change',async()=>{
@@ -16,9 +15,7 @@ document.getElementById('importSettings').addEventListener('change',async()=>{
     for(const prefix of ['source','target']){const side=p[prefix];if(!side)continue;
       for(const field of ['Host','Port','Database','Username'])if(side[field.toLowerCase()]!=null&&document.getElementById(prefix+field))document.getElementById(prefix+field).value=side[field.toLowerCase()];
     }
-    if(p.options)for(const [key,id] of [['maxRows','maxRows'],['maxTableGb','maxTableGb'],['diskReserveMb','diskReserveMb'],['fetchSize','fetchSize'],['batchRows','batchRows'],['batchMb','batchMb'],['queryTimeout','queryTimeout'],['readTimeout','readTimeout']])if(p.options[key]!=null&&document.getElementById(id))document.getElementById(id).value=p.options[key];
-    if(p.options&&document.getElementById('validateData'))document.getElementById('validateData').checked=!!p.options.validateData;
-    if(p.options&&document.getElementById('useCopy'))document.getElementById('useCopy').checked=!!p.options.useCopy;
+    // Transfer settings are chosen automatically per migration; older files' "options" are ignored.
     invalidate();
     document.getElementById('configStatus').textContent='Settings imported. Passwords were not included — enter them before connecting.';
   }catch(e){error('Could not import settings: '+e.message);}

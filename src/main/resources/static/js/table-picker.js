@@ -101,7 +101,7 @@ function addFilterRow(rows,columns,add){
 function closeTablePicker(apply){
   const m = SchemaBridgeState.migration;
   if(!apply){const selected=new Set(m.pickerOriginalSelection||[]);for(const option of document.getElementById('sourceTables').options)option.selected=selected.has(option.value);renderTablePicker();}
-  else if(!selectedSourceTables().length||selectedSourceTables().length>500){error('Select between 1 and 500 source tables to continue.');return;}
+  else if(!selectedSourceTables().length){error('Select at least one source table to continue.');return;}
   document.getElementById('tablePicker').close();updateTablePickerSummary();
 }
 document.getElementById('sourceTables').addEventListener('change',renderTablePicker);

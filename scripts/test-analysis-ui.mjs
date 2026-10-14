@@ -1,0 +1,81 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createRequire} from 'node:module';
+const require=createRequire(new URL('../target/ui-test/package.json',import.meta.url));
+const {JSDOM}=require('jsdom');
+const dom=new JSDOM(await readFile(new URL('../src/main/resources/static/index.html',import.meta.url),'utf8'),{url:'http://localhost:8098',runScripts:'outside-only'});
+const {window}=dom,calls=[];let polls=[];
+const reply=body=>({ok:true,json:async()=>body,text:async()=>''});
+window.fetch=async(path,options={})=>{
+  calls.push(`${options.method||'GET'} ${path}`);
+  if(path==='/api/preparations')return reply({id:'p1',state:'QUEUED',progress:{}});
+  if(path==='/api/preparations/p1')return reply(polls.length>1?polls.shift():polls[0]);
+  if(path.endsWith('/cancel'))return reply({id:'p1',state:'PREPARING',progress:{cancelRequested:true}});
+  return reply(path.endsWith('/jobs')?[]:{});
+};
+const el=id=>window.document.getElementById(id);
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const lastError=()=>Array.from(window.document.querySelectorAll('[data-toast-type="error"]')).at(-1)?.textContent||'';
+const JS_FILES=['format','api','toast','state','status-badge','progress-panel','connection-form','datasource-catalog','flow-and-upload','migration-stepper','table-picker','review-page','execution-page','revert-panel','history-page','storage-page','settings-page','dashboard-page','shell','main'];
+let combined='';
+for(const file of JS_FILES)combined+=await readFile(new URL(`../src/main/resources/static/js/${file}.js`,import.meta.url),'utf8')+'\n';
+window.eval(combined);
+await wait(25);
+
+// Rendering: step numbering, counts and percentages for each workflow shape.
+const overlay=el('analysisOverlay'),bar=()=>overlay.querySelector('.analysis-bar');
+assert.equal(overlay.hidden,true,'Overlay must be hidden on load');
+const dbToDb={database:true,target:true};
+window.renderAnalysis({state:'PREPARING',progress:{phase:'READING_DEFINITIONS',tablesDone:312,tablesTotal:700,table:'fg_layout_template',elapsedSeconds:41}},dbToDb);
+assert.equal(el('analysisTitle').textContent,'Analysing 700 tables');
+assert.equal(el('analysisStep').textContent,'Step 1 of 2 · Reading source definitions');
+assert.equal(el('analysisCount').textContent,'312 / 700 tables');
+assert.equal(el('analysisPercent').textContent,'22%');
+assert.equal(el('analysisBarFill').style.width,'22%');
+assert.equal(bar().getAttribute('aria-valuenow'),'22');
+assert.equal(el('analysisTable').textContent,'fg_layout_template');
+assert.equal(el('analysisElapsed').textContent,'Elapsed 41s');
+assert.equal(bar().classList.contains('indeterminate'),false);
+window.renderAnalysis({state:'PREPARING',progress:{phase:'COMPARING_TARGET',tablesDone:350,tablesTotal:700}},dbToDb);
+assert.equal(el('analysisStep').textContent,'Step 2 of 2 · Comparing with target');
+assert.equal(el('analysisPercent').textContent,'75%');
+window.renderAnalysis({state:'PREPARING',progress:{phase:'READING_DEFINITIONS',tablesDone:5,tablesTotal:10}},{database:true,target:false});
+assert.equal(el('analysisStep').textContent,'Step 1 of 1 · Reading source definitions');
+assert.equal(el('analysisPercent').textContent,'50%');
+window.renderAnalysis({state:'PREPARING',progress:{phase:'COMPARING_TARGET',tablesDone:1,tablesTotal:4}},{database:false,target:true});
+assert.equal(el('analysisStep').textContent,'Step 1 of 1 · Comparing with target','SQL input has no source-reading step');
+window.renderAnalysis({state:'QUEUED',progress:{}},dbToDb);
+assert.equal(el('analysisStep').textContent,'Waiting for another preparation to finish…');
+assert.equal(bar().classList.contains('indeterminate'),true);assert.equal(bar().hasAttribute('aria-valuenow'),false);
+assert.equal(el('analysisCount').textContent,'');
+window.renderAnalysis({state:'PREPARING',progress:{phase:'QUEUED'}},dbToDb);
+assert.equal(el('analysisStep').textContent,'Connecting to source…');
+
+// Submitting Analyse opens the overlay, polls, and cancel closes it with a status.
+el('example').click();
+polls=[{id:'p1',state:'PREPARING',progress:{phase:'QUEUED',elapsedSeconds:1}}];
+el('configuration').dispatchEvent(new window.Event('submit',{cancelable:true}));
+await wait(50);
+assert.equal(overlay.hidden,false,'Overlay must open while analysing');
+assert.equal(el('analyse').disabled,true);
+assert.ok(calls.includes('POST /api/preparations'),'Analyse must start a background preparation');
+assert.ok(!calls.includes('POST /api/plans'),'Analyse must not block on POST /plans');
+await wait(700);
+assert.equal(el('analysisStep').textContent,'Reading SQL input…');
+el('cancelAnalysis').click();await wait(20);
+assert.ok(calls.includes('POST /api/preparations/p1/cancel'));
+assert.equal(el('cancelAnalysis').disabled,true,'Cancel must not be clickable twice');
+polls=[{id:'p1',state:'CANCELLED',message:'Preparation failed.',progress:{cancelRequested:true}}];
+await wait(700);
+assert.equal(overlay.hidden,true,'Overlay must close after cancellation');
+assert.equal(el('configStatus').textContent,'Analysis cancelled.');
+assert.equal(el('analyse').disabled,false);
+
+// A failed analysis closes the overlay and shows the server's message.
+polls=[{id:'p1',state:'FAILED',message:'Connection refused. Check host and port.',progress:{}}];
+el('configuration').dispatchEvent(new window.Event('submit',{cancelable:true}));
+await wait(750);
+assert.equal(overlay.hidden,true,'Overlay must close after failure');
+assert.match(lastError(),/Connection refused/);
+assert.equal(el('configStatus').textContent,'Analysis failed. Check the message and try again.');
+console.log('Analysis overlay UI passed: step numbering, counts, percentages, background polling, cancel and failure.');

@@ -64,6 +64,9 @@ final class RowStore {
                 case "DATE" -> rs.getDate(index).toLocalDate().toString();
                 case "TIMESTAMP" -> rs.getTimestamp(index).toLocalDateTime().toString();
                 case "TIMESTAMPTZ" -> rs.getObject(index,OffsetDateTime.class).toString();
+                // Shortest exact round-trip text; NaN and ±Infinity are valid PostgreSQL input too.
+                case "REAL" -> Float.toString(rs.getFloat(index));
+                case "DOUBLE" -> Double.toString(rs.getDouble(index));
                 default -> rs.getString(index);
             };
             if(value.indexOf('\0')>=0)throw new IllegalArgumentException("NUL text is not portable between databases");
@@ -106,6 +109,10 @@ final class RowStore {
                 case "DATE" -> statement.setDate(index,java.sql.Date.valueOf(cell.value()));
                 case "TIMESTAMP" -> statement.setTimestamp(index,java.sql.Timestamp.valueOf(LocalDateTime.parse(cell.value())));
                 case "TIMESTAMPTZ" -> statement.setObject(index,OffsetDateTime.parse(cell.value()));
+                case "REAL" -> statement.setFloat(index,Float.parseFloat(cell.value()));
+                case "DOUBLE" -> statement.setDouble(index,Double.parseDouble(cell.value()));
+                // Sent untyped so PostgreSQL converts the text to the column's own type.
+                case "UUID","TIME","JSONB" -> statement.setObject(index,cell.value(),Types.OTHER);
                 default -> statement.setString(index,cell.value());
             }
         }
@@ -114,6 +121,7 @@ final class RowStore {
         case "DECIMAL","INTEGER","SMALLINT","BIGINT" -> Types.NUMERIC;
         case "BOOLEAN" -> Types.BOOLEAN;
         case "DATE" -> Types.DATE; case "TIMESTAMP" -> Types.TIMESTAMP;case "TIMESTAMPTZ" -> Types.TIMESTAMP_WITH_TIMEZONE;
+        case "REAL" -> Types.REAL; case "DOUBLE" -> Types.DOUBLE; case "TIME" -> Types.TIME; case "UUID","JSONB" -> Types.OTHER;
         case "TEXT" -> dialect==Dialect.ORACLE?Types.CLOB:Types.VARCHAR;case "BINARY" -> dialect==Dialect.ORACLE?Types.BLOB:Types.VARBINARY;default -> Types.VARCHAR;
     };}
     static String insertSql(Table table,String schema,Dialect dialect){return "INSERT INTO "+qualified(schema,table.name(),dialect)+" ("+SqlWriter.names(table.columns().stream().map(Column::name).toList(),dialect)+")"+(dialect==Dialect.POSTGRESQL && table.columns().stream().anyMatch(Column::always)?" OVERRIDING SYSTEM VALUE":"")+" VALUES ("+String.join(",",Collections.nCopies(table.columns().size(),"?"))+")";}

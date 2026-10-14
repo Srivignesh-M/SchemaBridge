@@ -27,6 +27,9 @@ public class DatabaseGateway {
         Properties properties = new Properties(); properties.setProperty("user", spec.username()); properties.setProperty("password", spec.password());
         properties.setProperty("ApplicationName", "fg-sql-migration");
         properties.setProperty("connectTimeout", "10"); properties.setProperty("socketTimeout", "120");
+        // PostgreSQL materializes every fetched row in memory. Refuse a fetch above a quarter of the heap
+        // instead of running out of memory; the driver closes the connection when this happens.
+        properties.setProperty("maxResultBuffer", "25percent");
         properties.setProperty("oracle.net.CONNECT_TIMEOUT", "10000"); properties.setProperty("oracle.jdbc.ReadTimeout", "120000");
         MigrationOptions options=OPTIONS.get();
         if(options!=null){properties.setProperty("socketTimeout",options.readTimeoutSeconds().toString());properties.setProperty("oracle.jdbc.ReadTimeout",Long.toString(options.readTimeoutSeconds()*1000L));}
@@ -66,6 +69,21 @@ public class DatabaseGateway {
             statement.setQueryTimeout(30);statement.setString(1,schema);statement.setString(2,table);
             try(ResultSet result=statement.executeQuery()){if(!result.next())throw new IllegalArgumentException("Cannot verify target table identity: "+table);return result.getString(1);}
         }
+    }
+    /** Catalog row count and on-disk size (PostgreSQL includes TOAST; Oracle excludes out-of-line LOBs). Null when unavailable. */
+    public AutoTuning.TableStats tableStats(Connection connection,String schema,String table,Dialect dialect) {
+        String query=dialect==Dialect.POSTGRESQL
+                ?"SELECT c.reltuples::bigint, pg_catalog.pg_total_relation_size(c.oid) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=? AND c.relname=? AND c.relkind IN ('r','p')"
+                :dialect==Dialect.ORACLE?"SELECT num_rows, num_rows*avg_row_len FROM all_tables WHERE owner=? AND table_name=?":null;
+        if(query==null)return null;
+        try(PreparedStatement statement=connection.prepareStatement(query)){
+            statement.setQueryTimeout(30);statement.setString(1,schema);statement.setString(2,table);
+            try(ResultSet result=statement.executeQuery()){
+                if(!result.next())return null;
+                long rows=result.getLong(1);boolean noRows=result.wasNull()||rows<0;long bytes=result.getLong(2);boolean noBytes=result.wasNull()||bytes<0;
+                return new AutoTuning.TableStats(noRows?null:rows,noBytes?null:bytes);
+            }
+        }catch(SQLException ignored){return null;}
     }
     public Long estimateRows(Connection connection,String schema,String table,Dialect dialect) {
         String query=dialect==Dialect.POSTGRESQL
@@ -175,7 +193,10 @@ public class DatabaseGateway {
         try (PreparedStatement statement = c.prepareStatement(query)) {
             statement.setQueryTimeout(30); statement.setString(1, schema); statement.setString(2, table); statement.setString(3, column);
             try (ResultSet rs = statement.executeQuery()) {
-                if (!rs.next() || !"BY DEFAULT".equals(rs.getString(1))) throw new IllegalArgumentException("Only BY DEFAULT identity columns are supported; serial or ALWAYS generation needs manual mapping on " + table);
+                boolean found = rs.next();
+                // No identity generation on PostgreSQL means a nextval() default, i.e. a serial column.
+                if (found && dialect == Dialect.POSTGRESQL && rs.getString(1) == null) { checkSerial(c, schema, table, column); return; }
+                if (!found || !"BY DEFAULT".equals(rs.getString(1))) throw new IllegalArgumentException("Only BY DEFAULT identity columns are supported; ALWAYS generation needs manual mapping on " + table);
                 if (dialect == Dialect.POSTGRESQL && (!"1".equals(rs.getString(2)) || !"NO".equals(rs.getString(3)))) throw new IllegalArgumentException("Custom identity increment/cycle needs manual mapping on " + table);
             }
         }
@@ -186,11 +207,27 @@ public class DatabaseGateway {
             }
         }
     }
-    private Value defaultValue(String text, Dialect dialect) {
+    /** A serial column owns its sequence; with step 1 and no cycling it behaves like a BY DEFAULT identity. */
+    private void checkSerial(Connection c, String schema, String table, String column) throws SQLException {
+        try (PreparedStatement statement = c.prepareStatement("SELECT s.seqincrement, s.seqcycle FROM pg_catalog.pg_sequence s WHERE s.seqrelid = pg_catalog.pg_get_serial_sequence(quote_ident(?)||'.'||quote_ident(?), ?)::regclass")) {
+            statement.setQueryTimeout(30); statement.setString(1, schema); statement.setString(2, table); statement.setString(3, column);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) throw new IllegalArgumentException("Column " + column + " uses a sequence it does not own; map its default manually on " + table);
+                if (rs.getLong(1) != 1 || rs.getBoolean(2)) throw new IllegalArgumentException("Custom serial increment/cycle needs manual mapping on " + table);
+            }
+        }
+    }
+    static Value defaultValue(String text, Dialect dialect) {
         if(text!=null && Set.of("true","false").contains(text.trim().toLowerCase(Locale.ROOT)))return new Value(text.trim().toUpperCase(Locale.ROOT));
         if (text == null) return null;
         String value = text.trim();
-        if (dialect == Dialect.POSTGRESQL) value = value.replaceFirst("::(?:character varying|text|bpchar|numeric|integer|bigint|smallint)$", "");
+        if (dialect == Dialect.POSTGRESQL) {
+            value = value.replaceFirst("::(?:character varying|text|bpchar|numeric|integer|bigint|smallint)$", "");
+            // now() is PostgreSQL's spelling of CURRENT_TIMESTAMP; typed literal casts become standard literals.
+            if (value.equalsIgnoreCase("now()")) value = "CURRENT_TIMESTAMP";
+            value = value.replaceFirst("^('[0-9]{4}-[0-9]{2}-[0-9]{2}')::date$", "DATE $1")
+                    .replaceFirst("^('[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+')::timestamp without time zone$", "TIMESTAMP $1");
+        }
         Parsed parsed = new SqlParser(dialect, dialect).parse("CREATE TABLE x (v VARCHAR(4000) DEFAULT " + value + ")");
         if (!parsed.issues().isEmpty()) throw new IllegalArgumentException("Default expression requires manual conversion");
         return parsed.tables().getFirst().columns().getFirst().defaultValue();
@@ -223,11 +260,12 @@ public class DatabaseGateway {
         Files.createFile(path);checkDisk(path,options);
         try(PreparedStatement statement=c.prepareStatement(query);BufferedWriter writer=Files.newBufferedWriter(path)){
             if(selection!=null && selection.rowLimit()!=null)statement.setMaxRows(selection.rowLimit());
-            progress.statement=statement;statement.setFetchSize(selection!=null && selection.rowLimit()!=null?Math.min(options.fetchSize(),selection.rowLimit()):options.fetchSize());statement.setQueryTimeout(options.queryTimeoutSeconds());
+            int fetch=options.fetchSize();
+            progress.statement=statement;statement.setFetchSize(selection!=null && selection.rowLimit()!=null?Math.min(fetch,selection.rowLimit()):fetch);statement.setQueryTimeout(options.queryTimeoutSeconds());
             for(int i=0;i<values.size();i++)statement.setObject(i+1,values.get(i));
-            try(ResultSet rs=statement.executeQuery()){
-                while(rs.next()){
-                    progress.check();if(++rows>limit)throw new IllegalArgumentException("Data exceeds configured row limit");
+            try(ResultSet rs=readable(statement::executeQuery,source,sourceDialect)){
+                while(readable(rs::next,source,sourceDialect)){
+                    progress.check();if(++rows>limit)throw new RowLimitExceeded();
                     RowStore.Cell[] row=RowStore.read(rs,source,targetDialect,path.getParent(),options,progress,diskSpaceProbe());
                     String line=RowStore.JSON.writeValueAsString(row);long length=line.getBytes(java.nio.charset.StandardCharsets.UTF_8).length+1;
                     for(RowStore.Cell cell:row)if(cell.file()!=null)length+=Files.size(RowStore.sidecar(path.getParent(),cell.file()));
@@ -240,6 +278,29 @@ public class DatabaseGateway {
         }finally{progress.statement=null;}
         return rows;
     }
+    /** Fetch size for tables with large values. The PostgreSQL driver holds every row of a fetch in memory and
+     * row sizes vary widely in document tables, so the fetch stays small instead of adapting to earlier rows. */
+    static final int LARGE_VALUE_FETCH = 10;
+    static boolean largeValues(Table table) {
+        return table.columns().stream().map(Column::type)
+                .anyMatch(type -> Set.of("TEXT", "BINARY", "JSONB").contains(type.kind()) || type.kind().equals("VARCHAR") && type.precision() == null);
+    }
+    /** Fetch size for explicit options, which carry no table statistics: large-value tables stay at the cap. */
+    static int fetchSize(Table table, MigrationOptions options) {
+        return largeValues(table) ? Math.min(options.fetchSize(), LARGE_VALUE_FETCH) : options.fetchSize();
+    }
+    @FunctionalInterface interface SqlCall<T> { T call() throws SQLException; }
+    /** The driver refused a fetch above the memory budget and closed the connection, so the whole read stops. */
+    static final class RowsTooLarge extends IllegalArgumentException { RowsTooLarge(String table){super("Rows in "+table+" are too large to read within the memory budget. Start SchemaBridge with more memory (-Xmx) and try again.");} }
+    static <T> T readable(SqlCall<T> call, Table table, Dialect dialect) throws SQLException {
+        try { return call.call(); }
+        catch (SQLException e) {
+            if (dialect == Dialect.POSTGRESQL && String.valueOf(e.getMessage()).contains("maxResultBuffer")) throw new RowsTooLarge(table.name().in(dialect));
+            throw e;
+        }
+    }
+    /** The plan-wide row budget ran out; unlike other per-table problems this ends the whole preparation. */
+    static final class RowLimitExceeded extends IllegalArgumentException { RowLimitExceeded(){super("Data exceeds configured row limit");} }
     protected RowStore.DiskSpaceProbe diskSpaceProbe() { return RowStore.SYSTEM_DISK_SPACE; }
     private void checkDisk(Path path,MigrationOptions options)throws IOException { RowStore.checkDisk(path,options,diskSpaceProbe()); }
     private Value literal(ResultSet rs, int index, Type type, Dialect target) throws SQLException {

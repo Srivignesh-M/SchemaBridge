@@ -2,7 +2,7 @@
 
 ## Browser edition
 
-`dist/Fingress-SQL-Migration-1.0.0-Browser.zip` contains the current application JAR and a trimmed Java runtime. Extract it, run `Start SchemaBridge.bat`, then open `http://localhost:8098`. Keep its command window open while working. History and logs live under `%LOCALAPPDATA%\Fingress SQL Migration`. Build or refresh it with `./scripts/package-browser.ps1`.
+`dist/Fingress-SQL-Migration-1.0.0-Browser.zip` contains the current application JAR and a trimmed Java runtime. Extract it, run `Start SchemaBridge.bat`, then open `http://localhost:8098`. Keep its command window open while working. History and logs live under `%LOCALAPPDATA%\Fingress SQL Migration`, or under the folder named by the `SCHEMABRIDGE_DATA_DIR` environment variable when it is set (for example `setx SCHEMABRIDGE_DATA_DIR "D:\SchemaBridge-data"`), which moves staged data for large migrations off the system drive. Build or refresh it with `./scripts/package-browser.ps1`.
 
 ## Smaller package using installed Java
 

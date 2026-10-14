@@ -80,7 +80,7 @@ public final class MigrationCli {
         Path work=Files.createDirectory(result.resolve(".work"));
         MigrationService service=new MigrationService(db,json,work.toString(),tuning.maxRows(),1);PlanView plan=null;
         try {
-            plan=service.create(new PlanRequest(sourceDialect,targetDialect,targetSchema,sql,source,config.source()==null?null:config.source().schema(),config.tables(),!Boolean.FALSE.equals(config.includeData()),target,tuning,config.selections(),false));
+            plan=service.create(new PlanRequest(sourceDialect,targetDialect,targetSchema,sql,source,config.source()==null?null:config.source().schema(),config.tables(),!Boolean.FALSE.equals(config.includeData()),target,config.options(),config.selections(),false));
             Map<String,Action> actions=new LinkedHashMap<>();boolean mismatch=false;
             for(TableReport table:plan.tables()) {
                 Action action=switch(table.status()) {case NEW, UNCHECKED -> Action.CREATE_AND_LOAD;case MATCH -> Action.valueOf(existing);case MISMATCH -> Action.SKIP;};
@@ -90,13 +90,15 @@ public final class MigrationCli {
             writeJson(result.resolve("preflight.json"),plan);
             writeJson(result.resolve("actions.json"),actions);
             for(String issue:plan.issues())out.println("Issue: "+issue);
+            for(ExcludedTable excluded:plan.excluded())out.println("Excluded: "+excluded.table()+" ("+excluded.reason()+")");
             try{service.validateDownload(plan.id(),actions);try(OutputStream zip=Files.newOutputStream(result.resolve("migration.zip"),StandardOpenOption.CREATE_NEW)){service.download(plan.id(),actions,zip);}}
             catch(IllegalArgumentException e){if(!command.equals("migrate"))throw e;out.println("SQL download unavailable: "+e.getMessage());}
-            boolean blocked=!plan.issues().isEmpty() || mismatch&&!Boolean.TRUE.equals(config.skipIncompatible());
+            boolean skipIncompatible=Boolean.TRUE.equals(config.skipIncompatible());
+            boolean blocked=!plan.issues().isEmpty() || (mismatch||!plan.excluded().isEmpty())&&!skipIncompatible;
             if(!command.equals("migrate")) {out.println("Conversion/report complete. No target changes performed.");return blocked?2:0;}
             if(blocked || plan.orderedScript()) {out.println("Migration blocked. Review preflight.json and migration.zip; ordered lifecycle scripts are download-only.");return 2;}
             if(actions.values().stream().allMatch(a->a==Action.SKIP)) {out.println("No tables selected for migration; all actions are SKIP.");return 0;}
-            JobView job=service.execute(plan.id(),new ExecuteRequest(target,actions));String state="";
+            JobView job=service.execute(plan.id(),new ExecuteRequest(target,actions,skipIncompatible));String state="";
             do {
                 job=service.job(job.id());
                 if(!job.state().equals(state)) {state=job.state();out.println("Migration: "+state);}

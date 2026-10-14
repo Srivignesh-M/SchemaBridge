@@ -50,15 +50,15 @@ class TransferFeaturesTest {
         var invalid=new TableSelection(null,null,List.of(new RowFilter("active","=","maybe")));
         assertFalse(service.create(request(false,Map.of("items",invalid),MigrationOptions.defaults())).issues().isEmpty());
     }
-    @Test void acceptsFiveHundredTablesAndRejectsFiveHundredOne()throws Exception {
+    @Test void acceptsMoreThanFiveHundredTablesAndRejectsNone()throws Exception {
         var tables=new ArrayList<String>();
         try(Connection c=DriverManager.getConnection(sourceUrl);Statement st=c.createStatement()){
-            for(int i=0;i<500;i++){String name="table_"+i;tables.add(name);st.execute("CREATE TABLE "+name+"(id INTEGER)");}
+            for(int i=0;i<700;i++){String name="table_"+i;tables.add(name);st.execute("CREATE TABLE "+name+"(id INTEGER)");}
         }
         var request=new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",tables,false,null,MigrationOptions.defaults(),Map.of(),true);
-        assertEquals(500,service.create(request).tables().size());
-        tables.add("table_500");
-        assertTrue(assertThrows(IllegalArgumentException.class,()->service.create(request)).getMessage().contains("500 source tables"));
+        assertEquals(700,service.create(request).tables().size());
+        var empty=new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",List.of(),false,null,MigrationOptions.defaults(),Map.of(),true);
+        assertTrue(assertThrows(IllegalArgumentException.class,()->service.create(empty)).getMessage().contains("at least one source table"));
     }
     @Test void mapsSelectedColumnsAndUsesParameterizedFilters()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY, label VARCHAR(100), omitted VARCHAR(10)); INSERT INTO items VALUES(1,'first','x'),(2,'second','y')");
@@ -80,6 +80,100 @@ class TransferFeaturesTest {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(30);
         while(Set.of("QUEUED","PREPARING").contains(p.state())&&System.nanoTime()<end){Thread.sleep(10);p=service.preparation(p.id());}
         assertEquals("READY",p.state(),p.message());assertEquals(110000,p.progress().rowsRead());assertEquals(110000,p.plan().tables().getFirst().rows());
+    }
+    PreparationView awaitPreparation(PreparationView p)throws Exception {
+        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(30);
+        while(Set.of("QUEUED","PREPARING").contains(p.state())&&System.nanoTime()<end){Thread.sleep(10);p=service.preparation(p.id());}
+        return p;
+    }
+    @Test void backgroundAnalysisReportsTableCountsAndCanBeCancelled()throws Exception {
+        var tables=new ArrayList<String>();
+        try(Connection c=DriverManager.getConnection(sourceUrl);Statement st=c.createStatement()){
+            for(int i=0;i<300;i++){String name="table_"+i;tables.add(name);st.execute("CREATE TABLE "+name+"(id INTEGER)");}
+        }
+        var request=new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",tables,false,target,MigrationOptions.defaults(),Map.of(),true);
+        PreparationView done=awaitPreparation(service.prepare(request));
+        assertEquals("READY",done.state(),done.message());
+        assertEquals("COMPARING_TARGET",done.progress().phase());
+        assertEquals(300,done.progress().tablesTotal());assertEquals(300,done.progress().tablesDone());
+        assertEquals(300,done.plan().tables().size());
+        PreparationView started=service.prepare(request);service.cancelPreparation(started.id());
+        PreparationView cancelled=awaitPreparation(started);
+        assertEquals("CANCELLED",cancelled.state(),cancelled.message());
+        assertTrue(cancelled.progress().tablesDone()<300);
+    }
+    PlanRequest prepared(List<String> tables,MigrationOptions options){return new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",tables,true,null,options,Map.of(),false);}
+    @Test void rowBudgetAcrossTablesEndsPreparationWithAClearMessage()throws Exception {
+        sql(sourceUrl,"CREATE TABLE a(id INTEGER); INSERT INTO a VALUES(1),(2); CREATE TABLE b(id INTEGER); INSERT INTO b VALUES(1),(2); CREATE TABLE c(id INTEGER); INSERT INTO c VALUES(1)");
+        var failure=assertThrows(IllegalArgumentException.class,()->service.create(prepared(List.of("a","b","c"),MigrationOptions.defaults(3))));
+        assertTrue(failure.getMessage().contains("row limit for this plan"),failure.getMessage());
+        assertEquals(3,service.create(prepared(List.of("a","c"),MigrationOptions.defaults(3))).tables().stream().mapToLong(TableReport::rows).sum());
+    }
+    @Test void tableFailingMidExportDoesNotBreakTheNextTable()throws Exception {
+        sql(sourceUrl,"CREATE TABLE a(id INTEGER, label VARCHAR(10)); INSERT INTO a VALUES(1,'ok'),(2,CHAR(0)); CREATE TABLE b(id INTEGER); INSERT INTO b VALUES(1),(2)");
+        PlanView plan=service.create(prepared(List.of("a","b"),MigrationOptions.defaults()));
+        assertTrue(plan.issues().isEmpty(),plan.issues().toString());
+        assertEquals(List.of("a"),plan.excluded().stream().map(ExcludedTable::table).toList());assertTrue(plan.excluded().getFirst().reason().contains("NUL"));
+        assertEquals(List.of("b"),plan.tables().stream().map(TableReport::table).toList());assertEquals(2,plan.tables().getFirst().rows());
+    }
+    @Test void postgresNativeTypesTransferValidateAndRevert()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY, ratio REAL, score DOUBLE PRECISION, ext UUID, at TIME(6))");
+        try(Connection c=DriverManager.getConnection(sourceUrl);PreparedStatement s=c.prepareStatement("INSERT INTO items VALUES(?,?,?,?,?)")){
+            s.setInt(1,1);s.setFloat(2,0.1f);s.setDouble(3,1e-05);s.setObject(4,UUID.fromString("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"));s.setObject(5,java.time.LocalTime.parse("23:59:59.123456"));s.executeUpdate();
+            s.setInt(1,2);s.setFloat(2,Float.NEGATIVE_INFINITY);s.setDouble(3,Double.NaN);s.setObject(4,UUID.fromString("00000000-0000-0000-0000-000000000000"));s.setObject(5,java.time.LocalTime.MIDNIGHT);s.executeUpdate();
+            s.setInt(1,3);s.setNull(2,Types.REAL);s.setNull(3,Types.DOUBLE);s.setNull(4,Types.OTHER);s.setNull(5,Types.TIME);s.executeUpdate();
+        }
+        PlanView p=plan();assertTrue(p.issues().isEmpty(),p.issues().toString());
+        JobView job=run(p,Action.CREATE_AND_LOAD);assertEquals("SUCCEEDED",job.state(),job.message());
+        assertEquals("PASSED",job.tables().getFirst().validation().outcome());assertEquals("FINGERPRINT",job.tables().getFirst().validation().method());
+        try(Connection c=DriverManager.getConnection(targetUrl);Statement st=c.createStatement();ResultSet r=st.executeQuery("SELECT ratio,score,ext,at FROM items ORDER BY id")){
+            assertTrue(r.next());assertEquals(0.1f,r.getFloat(1));assertEquals(1e-05,r.getDouble(2));assertEquals(UUID.fromString("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"),r.getObject(3,UUID.class));assertEquals(java.time.LocalTime.parse("23:59:59.123456"),r.getObject(4,java.time.LocalTime.class));
+            assertTrue(r.next());assertEquals(Float.NEGATIVE_INFINITY,r.getFloat(1));assertTrue(Double.isNaN(r.getDouble(2)));
+            assertTrue(r.next());r.getFloat(1);assertTrue(r.wasNull());r.getObject(3);assertTrue(r.wasNull());
+        }
+        RevertPreview review=service.previewRevert(job.id(),target);JobView reverted=service.revert(job.id(),new RevertRequest(target,review.token()));
+        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(30);
+        while(Set.of("QUEUED","RUNNING").contains(reverted.revert().state())&&System.nanoTime()<end){Thread.sleep(10);reverted=service.job(job.id());}
+        assertEquals("REVERTED",reverted.revert().state(),reverted.revert().message());
+    }
+    @Test void excludedTablesAndTheirDependentsAreSkippedOnlyAfterConfirmation()throws Exception {
+        sql(sourceUrl,"CREATE TABLE parent(id INTEGER PRIMARY KEY, active BOOLEAN); INSERT INTO parent VALUES(1,TRUE);"
+                +"CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id)); INSERT INTO child VALUES(1,1);"
+                +"CREATE TABLE grandchild(id INTEGER PRIMARY KEY, child_id INTEGER REFERENCES child(id)); INSERT INTO grandchild VALUES(1,1);"
+                +"CREATE TABLE standalone(id INTEGER PRIMARY KEY); INSERT INTO standalone VALUES(1),(2)");
+        // An invalid filter makes the parent fail, standing in for any per-table problem.
+        var invalid=Map.of("parent",new TableSelection(null,null,List.of(new RowFilter("active","=","maybe"))));
+        var request=new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",List.of("parent","child","grandchild","standalone"),true,target,MigrationOptions.defaults(),invalid,false);
+        PlanView plan=service.create(request);
+        assertTrue(plan.issues().isEmpty(),plan.issues().toString());
+        assertEquals(List.of("standalone"),plan.tables().stream().map(TableReport::table).toList());
+        Map<String,String> excluded=new LinkedHashMap<>();plan.excluded().forEach(t->excluded.put(t.table(),t.reason()));
+        assertEquals(Set.of("parent","child","grandchild"),excluded.keySet());
+        assertTrue(excluded.get("child").contains("References parent, which cannot be migrated"),excluded.get("child"));
+        assertTrue(excluded.get("grandchild").contains("References child"),excluded.get("grandchild"));
+        var actions=Map.of("standalone",Action.CREATE_AND_LOAD);
+        assertTrue(assertThrows(IllegalArgumentException.class,()->service.execute(plan.id(),new ExecuteRequest(target,actions))).getMessage().contains("3 selected tables cannot be migrated"));
+        JobView job=await(service.execute(plan.id(),new ExecuteRequest(target,actions,true)));
+        assertEquals("SUCCEEDED",job.state(),job.message());assertEquals(2,count("standalone"));assertThrows(SQLException.class,()->count("parent"));
+    }
+    @Test void parentAlreadyInTargetKeepsChildPlanned()throws Exception {
+        sql(sourceUrl,"CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))");
+        sql(targetUrl,"CREATE TABLE parent(id INTEGER PRIMARY KEY)");
+        var request=new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",List.of("child"),true,target,MigrationOptions.defaults(),Map.of(),false);
+        PlanView plan=service.create(request);
+        assertTrue(plan.excluded().isEmpty(),plan.excluded().toString());assertEquals(List.of("child"),plan.tables().stream().map(TableReport::table).toList());
+    }
+    @Test void preparationRunningOutOfMemoryFailsCleanly()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");
+        var exhausted=new DatabaseGateway(){
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException{return db.connect(spec);}
+            @Override long exportTyped(Connection c,Table source,Table filterTable,TableSelection selection,String schema,Dialect sourceDialect,Dialect targetDialect,Path path,long limit,MigrationOptions options,TransferProgress progress){throw new OutOfMemoryError("simulated");}
+        };
+        service.close();Path work=Files.createDirectories(directory.resolve("oom"));service=new MigrationService(exhausted,json,work.toString(),2_000_000,30);
+        PreparationView p=awaitPreparation(service.prepare(request(false,Map.of(),MigrationOptions.defaults())));
+        assertEquals("FAILED",p.state());assertTrue(p.message().startsWith("Ran out of memory on items"),p.message());
+        try(var leftovers=Files.list(work)){assertTrue(leftovers.noneMatch(Files::isDirectory),"The partial plan folder must be removed");}
+        assertEquals("READY",awaitPreparation(service.prepare(request(true,Map.of(),MigrationOptions.defaults()))).state(),"The service must keep working after a failure");
     }
     @Test void migrationOptionsDefaultLegacySettingsToVersionOneAndRejectUnknownVersions()throws Exception {
         MigrationOptions legacy=json.readValue("{\"maxRows\":500}",MigrationOptions.class);
@@ -176,8 +270,8 @@ class TransferFeaturesTest {
     @Test void corruptedStagingCannotWriteAndQuotasDoNotTruncate()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1),(2)");
         var options=new MigrationOptions(1L,null,0L,null,null,null,null,null,null,null);
-        PlanView limited=service.create(request(false,Map.of(),options));assertFalse(limited.issues().isEmpty());
-        assertThrows(IllegalArgumentException.class,()->service.execute(limited.id(),new ExecuteRequest(target,Map.of())));
+        var rowLimitOptions=options;
+        assertTrue(assertThrows(IllegalArgumentException.class,()->service.create(request(false,Map.of(),rowLimitOptions))).getMessage().contains("row limit for this plan"),"exceeding the row limit must not produce a truncated plan");
         PlanView p=plan();Files.writeString(directory.resolve(p.id()).resolve("data-0.rows"),"tampered");JobView job=run(p,Action.CREATE_AND_LOAD);assertEquals("FAILED",job.state());assertTrue(job.message().contains("changed"));assertThrows(SQLException.class,()->count("items"));
         options=new MigrationOptions(null,10L,0L,null,null,null,null,null,null,null);assertFalse(service.create(request(false,Map.of(),options)).issues().isEmpty());
         var disk=new MigrationOptions(null,null,Long.MAX_VALUE,null,null,null,null,null,null,null);assertThrows(java.io.IOException.class,()->service.create(request(false,Map.of(),disk)));

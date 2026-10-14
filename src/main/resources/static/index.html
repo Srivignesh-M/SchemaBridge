@@ -62,7 +62,10 @@
   </section>
   <section id="storagePage" class="app-page" hidden>
     <div class="section-heading"><h2>Storage</h2></div>
-    <section class="card" aria-labelledby="storageTitle"><div class="section-title"><h2 id="storageTitle">Local storage</h2><button id="refreshStorage" class="secondary" type="button">Refresh storage</button></div><p class="muted">Staged data and reports for all saved plans, plus free disk space on this work directory's drive. A preview only — nothing is deleted here.</p><dl class="progress-metrics" id="storageMetrics"></dl><p id="storageOrphans" class="muted" hidden></p></section>
+    <section class="card" aria-labelledby="storageTitle"><div class="section-title"><h2 id="storageTitle">Local storage</h2><button id="refreshStorage" class="secondary" type="button">Refresh storage</button></div><p class="muted">Staged data and reports for all saved plans, plus free disk space on this work directory's drive. Deleting a plan removes only its local files; nothing changes in any database.</p><dl class="progress-metrics" id="storageMetrics"></dl><p id="storageOrphans" class="muted" hidden></p>
+      <div class="section-title storage-plans-heading"><h3 id="storagePlansTitle">Saved plans</h3><button id="deleteUnusedPlans" class="secondary" type="button" hidden>Delete all plans that never ran</button></div>
+      <p id="storagePlansEmpty" class="muted" hidden>No saved plans.</p>
+      <div class="table-scroll"><table id="storagePlans" aria-labelledby="storagePlansTitle" hidden><thead><tr><th scope="col">Status</th><th scope="col">Plan</th><th scope="col">Source → target</th><th scope="col">Tables</th><th scope="col">Size</th><th scope="col">Expires</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody></tbody></table></div></section>
   </section>
   <section id="settingsPage" class="app-page" hidden>
     <div class="section-heading"><h2>Settings</h2></div>
@@ -112,19 +115,6 @@
           <div class="note"><strong>Insert-only loading</strong><p>Duplicate keys fail. Existing rows are never silently replaced.</p></div>
         </section>
       </div>
-      <section class="card transfer-settings"><details><summary>Advanced transfer settings</summary><div class="two-col">
-        <label>Maximum rows<input id="maxRows" type="number" min="1" max="1000000000" value="2000000"></label>
-        <label>Maximum exported GB per table<input id="maxTableGb" type="number" min="0.001" step="0.001" max="1000" value="10"></label>
-        <label>Keep free disk space (MB)<input id="diskReserveMb" type="number" min="0" value="256"></label>
-        <label>Rows fetched per request<input id="fetchSize" type="number" min="1" max="10000" value="1000"></label>
-        <label>Rows per insert batch<input id="batchRows" type="number" min="1" max="10000" value="1000"></label>
-        <label>Maximum batch MB<input id="batchMb" type="number" min="0.01" max="64" step="0.01" value="4"></label>
-        <label>Query timeout (seconds)<input id="queryTimeout" type="number" min="1" max="86400" value="1800"></label>
-        <label>Connection read timeout (seconds)<input id="readTimeout" type="number" min="1" max="86400" value="1800"></label>
-      </div>
-      <label class="inline"><input id="validateData" type="checkbox" checked> Verify transferred data before committing each table</label>
-      <label class="inline"><input id="useCopy" type="checkbox"> Use PostgreSQL bulk loading (COPY) for database sources</label>
-      <p class="muted">Completed tables are retained after a later failure. A higher row limit is not a guarantee for every table shape.</p></details></section>
       <div class="action-bar"><button type="button" class="secondary" data-back="1">Back</button><span id="configStatus" role="status">Configure a source to begin.</span><button id="analyse" type="submit">Analyse and review <span>→</span></button></div>
     </section>
 
@@ -132,7 +122,7 @@
       <div class="picker-header"><div><span class="eyebrow">SOURCE TABLES</span><h2 id="tablePickerTitle">Choose tables and names</h2><p class="muted">Select what to transfer. You can give each selected table a different name in the destination.</p></div><button type="button" id="closeTablePicker" class="icon-button" aria-label="Close table picker">×</button></div>
       <div class="table-picker-grid">
         <section class="picker-list" aria-label="Available tables"><label>Search tables<input id="tableSearch" type="search" placeholder="Filter by table name"></label><label class="select-all inline"><input id="selectAllTables" type="checkbox"> Select all visible</label><div id="tablePickerList" class="table-picker-list"></div></section>
-        <section class="picker-mappings"><h3>Destination table names and column options</h3><p class="muted">Up to 500 tables. Open a selected table to rename columns, add filters, or limit rows. All rows and columns are included by default.</p><div id="columnOptions"></div></section>
+        <section class="picker-mappings"><h3>Destination table names and column options</h3><p class="muted">Open a selected table to rename columns, add filters, or limit rows. All rows and columns are included by default.</p><div id="columnOptions"></div></section>
       </div>
       <div class="picker-footer"><p id="pickerCount" class="muted" role="status" aria-live="polite">No tables selected.</p><div><button type="button" id="cancelTablePicker" class="secondary">Cancel</button><button type="button" id="applyTablePicker">Use selected tables</button></div></div>
     </dialog>
@@ -143,6 +133,11 @@
     <section id="reportSection" class="card" hidden>
       <div class="section-title"><div><span class="eyebrow">PREFLIGHT REPORT</span><h2 id="reportTitle">Review every table</h2></div><button id="matchAll" class="secondary" type="button">DML only for all matches</button></div>
       <div id="reportMessages"></div>
+      <section id="excludedSection" class="excluded-panel" aria-labelledby="excludedTitle" hidden>
+        <h3 id="excludedTitle">Tables that can't be migrated</h3>
+        <p class="muted">These selected tables are left out of this plan. The other tables can still be exported or run; you confirm skipping these before running.</p>
+        <div class="table-scroll"><table><thead><tr><th scope="col">Table</th><th scope="col">Why it's left out</th></tr></thead><tbody id="excludedRows"></tbody></table></div>
+      </section>
       <p id="quotaSummary" class="muted"></p>
       <div id="statementSection" hidden><p id="statementSummary"></p><div class="table-scroll"><table><thead><tr><th>Statement</th><th>Type</th><th>Conversion status</th><th>Findings</th></tr></thead><tbody id="statementRows"></tbody></table></div></div>
       <div class="table-scroll" id="tableReport"><table><thead><tr><th>Target table</th><th>Target status</th><th>Rows</th><th>Findings</th><th>Action</th></tr></thead><tbody id="reportRows"></tbody></table></div>
@@ -156,6 +151,7 @@
     <div class="section-heading"><div><span class="eyebrow">STEP 4 OF 4</span><h2>Export or run migration</h2><p class="muted">Start the selected action, then follow its progress and download the report.</p></div></div>
     <section id="outputActions" class="card" hidden>
       <div class="section-title"><div><h2 id="outputTitle">Ready for your next step</h2><p id="outputDescription" class="muted"></p></div><button type="button" class="secondary" data-back="3">Back to review</button></div>
+      <label id="skipExcludedLabel" class="inline skip-excluded" hidden><input type="checkbox" id="skipExcluded"><span id="skipExcludedText">Skip the excluded tables and migrate the rest</span></label>
       <div class="action-bar"><button id="reportDownload" class="secondary" type="button">Download review report</button><div><button id="prepareData" class="secondary" type="button" hidden>Prepare table data</button><button id="download" class="secondary" type="button">Prepare ZIP download</button><button id="execute" type="button">Run selected plan</button></div></div>
       <div id="downloadHelp" class="download-help" hidden><p id="downloadStatus" role="status" aria-live="polite"></p><a id="downloadLink" class="download-link" href="" hidden></a></div>
     </section>
@@ -183,6 +179,17 @@
   <div id="error" role="alert" hidden></div>
   <footer><img class="footer-banner" src="/images/schemabridge-banner.png" alt="SchemaBridge — Connect. Convert. Migrate."><span>SchemaBridge · Local single-user application · Credentials are kept out of reports</span></footer>
 </main>
+  </div>
+</div>
+<div id="analysisOverlay" class="analysis-overlay" role="dialog" aria-modal="true" aria-labelledby="analysisTitle" hidden>
+  <div class="analysis-card">
+    <div class="analysis-spinner" aria-hidden="true"></div>
+    <h2 id="analysisTitle">Analysing tables</h2>
+    <p id="analysisStep" class="analysis-step">Connecting to source…</p>
+    <div class="analysis-bar" role="progressbar" aria-labelledby="analysisStep" aria-valuemin="0" aria-valuemax="100"><div id="analysisBarFill"></div></div>
+    <p class="analysis-count"><span id="analysisCount"></span><span id="analysisPercent"></span></p>
+    <p id="analysisTable" class="analysis-table"></p>
+    <div class="analysis-footer"><span id="analysisElapsed" class="muted">Elapsed 0s</span><button type="button" id="cancelAnalysis" class="secondary">Cancel</button></div>
   </div>
 </div>
 </body>

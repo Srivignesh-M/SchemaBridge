@@ -21,6 +21,9 @@ record DataFingerprint(long count, BigInteger sum) {
         case "TIMESTAMP" -> LocalDateTime.parse(value.replace(' ','T')).toString();
         case "TIMESTAMPTZ" -> OffsetDateTime.parse(value).toInstant().toString();
         case "CHAR" -> value.replaceFirst(" +$","");
+        case "REAL" -> Float.toString(Float.parseFloat(value));
+        case "DOUBLE" -> Double.toString(Double.parseDouble(value));
+        case "UUID" -> value.toLowerCase(Locale.ROOT);
         default -> value;
     };}
     static void bytes(MessageDigest digest,InputStream input)throws IOException{try(input){byte[] data=new byte[65536];int n;while((n=input.read(data))!=-1)digest.update(data,0,n);}}
@@ -47,8 +50,9 @@ record DataFingerprint(long count, BigInteger sum) {
         DataFingerprint result=empty();
         try(Statement statement=connection.createStatement()){
             progress.statement=statement;statement.setFetchSize(options.fetchSize());statement.setQueryTimeout(options.queryTimeoutSeconds());
-            try(ResultSet rs=statement.executeQuery("SELECT "+SqlWriter.names(table.columns().stream().map(Column::name).toList(),dialect)+" FROM "+qualified(schema,table.name(),dialect))){
-                while(rs.next()){
+            String query="SELECT "+SqlWriter.names(table.columns().stream().map(Column::name).toList(),dialect)+" FROM "+qualified(schema,table.name(),dialect);
+            try(ResultSet rs=DatabaseGateway.readable(()->statement.executeQuery(query),table,dialect)){
+                while(DatabaseGateway.readable(rs::next,table,dialect)){
                     progress.check();MessageDigest row=digest();
                     for(int i=0;i<table.columns().size();i++){
                         String kind=table.columns().get(i).type().kind();int index=i+1;MessageDigest value=digest();
@@ -61,6 +65,8 @@ record DataFingerprint(long count, BigInteger sum) {
                             case "BOOLEAN" -> Boolean.toString(rs.getBoolean(index));
                             case "DATE" -> rs.getDate(index).toLocalDate().toString();
                             case "TIMESTAMPTZ" -> rs.getObject(index,OffsetDateTime.class).toString();
+                            case "REAL" -> Float.toString(rs.getFloat(index));
+                            case "DOUBLE" -> Double.toString(rs.getDouble(index));
                             default -> rs.getString(index);
                         };value.update(canonical(kind,text).getBytes(StandardCharsets.UTF_8));}
                         row.update(value.digest());

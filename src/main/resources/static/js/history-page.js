@@ -8,6 +8,13 @@ function hasUnfinishedMigrationWork(){
   if (m.finalJob && m.lastRequest === null && m.plan === null && m.requestVersion > 0) return true; // invalidate() ran after a finished job, with no re-analysis yet
   return false;
 }
+// Clears the migration page if it is showing a plan (or that plan's job) that was just deleted.
+function forgetDeletedPlan(planId){
+  const m = SchemaBridgeState.migration;
+  if(m.finalJob?.planId===planId){clearTimeout(m.polling);m.polling=null;m.finalJob=null;document.getElementById('jobSection').hidden=true;document.getElementById('revertSection').hidden=true;clearRevertReview();}
+  if(m.plan?.id===planId)invalidate();
+}
+const UNCERTAIN_DISCARD_PROMPT='This job\'s commit outcome is uncertain — these files are the evidence needed to reconcile the target (see RECOVERY-RUNBOOK.md). Only discard them after you have manually verified and reconciled the target database. Discard anyway?';
 function jobHistoryCard(job){
   const card=document.createElement('article');card.className='history-card';card.setAttribute('role','listitem');
   const heading=document.createElement('div');heading.className='history-card-heading';
@@ -22,13 +29,10 @@ function jobHistoryCard(job){
     const uncertain=job.state==='RECOVERY_REQUIRED'||['PARTIAL','RECOVERY_REQUIRED'].includes(job.revert?.state);
     const remove=document.createElement('button');remove.className=uncertain?'secondary danger':'secondary';remove.textContent=uncertain?'Review and discard evidence':'Delete saved files';
     remove.addEventListener('click',async()=>{
-      const prompt=uncertain
-        ?'This job\'s commit outcome is uncertain — these files are the evidence needed to reconcile the target (see RECOVERY-RUNBOOK.md). Only discard them after you have manually verified and reconciled the target database. Discard anyway?'
-        :'Delete this saved migration and its exported data? Target database rows will remain.';
+      const prompt=uncertain?UNCERTAIN_DISCARD_PROMPT:'Delete this saved migration and its exported data? Target database rows will remain.';
       if(!window.confirm(prompt))return;
       remove.disabled=true;
-      const m = SchemaBridgeState.migration;
-      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');if(m.finalJob?.id===job.id){clearTimeout(m.polling);m.polling=null;m.finalJob=null;document.getElementById('jobSection').hidden=true;document.getElementById('revertSection').hidden=true;clearRevertReview();}if(m.plan?.id===job.planId)invalidate();await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
+      try{await api('/plans/'+job.planId+(uncertain?'?acknowledgeUncertain=true':''),undefined,'DELETE');forgetDeletedPlan(job.planId);await refreshHistory();}catch(e){remove.disabled=false;error(e.message);}
     });
     actions.append(remove);
   }

@@ -17,20 +17,17 @@ function renderPlan() {
     for (const statement of statements) { const row = document.createElement('tr'); cell(row, statement.number); cell(row, statement.kind); cell(row, statement.status); cell(row, statement.messages.join(' · ') || 'Converted. See the full preview below.'); document.getElementById('statementRows').append(row); }
   }
   for (const [messages, kind] of [[plan.issues,'issue'],[plan.warnings,'warning']]) for (const text of messages) { const p = document.createElement('p'); p.className = 'message ' + kind; p.textContent = text; document.getElementById('reportMessages').append(p); }
-  const maxRows = plan.options && plan.options.maxRows;
-  if (maxRows && !plan.orderedScript) {
-    const totalRows = plan.tables.reduce((sum,t) => sum + (t.rows||0), 0);
-    const hasUnextracted = plan.tables.some(t => (t.rows||0)===0 && t.estimatedRows!=null);
-    document.getElementById('quotaSummary').textContent = plan.prepared===false
-      ? `Row budget: ${maxRows.toLocaleString()} total across this plan. Per-table counts are not yet extracted.`
-      : `Row budget used: ${totalRows.toLocaleString()} / ${maxRows.toLocaleString()} (${((totalRows/maxRows)*100).toFixed(1)}%)${hasUnextracted?' — some tables show an estimate only':''}.`;
-  } else document.getElementById('quotaSummary').textContent = '';
+  renderExcluded(plan.excluded || []);
+  document.getElementById('quotaSummary').textContent = plan.orderedScript ? '' : transferSummary(plan);
+  const maxRows = !plan.automatic && plan.options && plan.options.maxRows;
   const findingKindLabel = {MISSING_TARGET_COLUMN:'Missing column',EXTRA_TARGET_COLUMN:'Extra column',TYPE_MISMATCH:'Type mismatch',NULLABILITY_MISMATCH:'Nullability',IDENTITY_MISMATCH:'Identity',DEFAULT_MISMATCH:'Default value',KEY_OR_INDEX_MISMATCH:'Keys/indexes',ORACLE_IDENTITY_DML_BLOCKED:'Identity + DML only'};
   for (const table of plan.tables) {
     const tr = document.createElement('tr'); cell(tr,table.table); const status = cell(tr,''); status.append(statusBadge('table', table.status));
     const rowSummary=plan.prepared===false?(table.estimatedRows==null?'Not extracted; estimate unavailable':`~${table.estimatedRows.toLocaleString()} estimated (not extracted)`):`${table.rows.toLocaleString()} extracted`;
     const rowCell = cell(tr, rowSummary);
     if (maxRows && table.rows) { const share = document.createElement('div'); share.className='muted'; share.textContent = `${((table.rows/maxRows)*100).toFixed(2)}% of budget`; rowCell.append(share); }
+    const tuning = plan.automatic && plan.tableOptions && plan.tableOptions[table.table];
+    if (tuning) { const auto = document.createElement('div'); auto.className='muted table-tuning'; auto.textContent = `${tuning.fetchSize.toLocaleString()} rows per fetch · up to ${formatDuration(tuning.queryTimeoutSeconds)} per step`; rowCell.append(auto); }
     const findings = cell(tr, ''); findings.textContent = '';
     if (table.dependsOn && table.dependsOn.length) { const dep = document.createElement('div'); dep.className='muted'; dep.textContent = 'Depends on: ' + table.dependsOn.join(', '); findings.append(dep); }
     if (table.columnComparison && table.columnComparison.length) {
@@ -52,8 +49,34 @@ function renderPlan() {
     for(const action of table.allowedActions) { const option = document.createElement('option'); option.value = action; option.textContent = ({CREATE_AND_LOAD:'Create + load',DML_ONLY:'DML only',SKIP:'Skip table'})[action]; select.append(option); }
     select.value = table.status === 'MATCH' || table.status === 'MISMATCH' ? 'SKIP' : 'CREATE_AND_LOAD'; td.append(select); document.getElementById('reportRows').append(tr);
   }
-  document.getElementById('execute').hidden = !plan.targetChecked || plan.orderedScript; document.getElementById('execute').disabled = plan.issues.length > 0 || plan.orderedScript || plan.prepared===false; document.getElementById('download').disabled = plan.prepared===false; document.getElementById('prepareData').hidden=plan.prepared!==false;
+  document.getElementById('execute').hidden = !plan.targetChecked || plan.orderedScript; updateExecuteEnabled(); document.getElementById('download').disabled = plan.prepared===false; document.getElementById('prepareData').hidden=plan.prepared!==false;
 }
+// Settings are worked out per migration; this states what was chosen so nothing is hidden.
+function transferSummary(plan){
+  const rows=plan.tables.reduce((sum,t)=>sum+(t.rows||0),0),estimated=plan.tables.reduce((sum,t)=>sum+(t.estimatedRows||0),0);
+  const count=plan.prepared===false?(estimated?`about ${estimated.toLocaleString()} rows estimated, not yet extracted`:'rows not yet extracted'):`${rows.toLocaleString()} rows extracted`;
+  if(!plan.automatic||!plan.options)return count.charAt(0).toUpperCase()+count.slice(1)+'.';
+  const o=plan.options,parts=[`keeps at least ${formatBytes(o.diskReserveBytes)} free on the data drive`,'verifies each table before committing'];
+  if(o.useCopy)parts.push('loads with PostgreSQL COPY');
+  return `${count.charAt(0).toUpperCase()+count.slice(1)}. Transfer settings are chosen automatically for these tables: ${parts.join(', ')}; fetch sizes and time limits are sized per table from its row count and size.`;
+}
+function renderExcluded(excluded){
+  const section=document.getElementById('excludedSection'),rows=document.getElementById('excludedRows');rows.replaceChildren();
+  section.hidden=!excluded.length;
+  document.getElementById('excludedTitle').textContent=`${excluded.length} table${excluded.length===1?'':'s'} can't be migrated`;
+  for(const item of excluded){const tr=document.createElement('tr');const name=document.createElement('code');name.textContent=item.table;cell(tr,'').append(name);cell(tr,item.reason);rows.append(tr);}
+  const skip=document.getElementById('skipExcluded');skip.checked=false;
+  document.getElementById('skipExcludedLabel').hidden=!excluded.length;
+  document.getElementById('skipExcludedText').textContent=`Skip the ${excluded.length} excluded table${excluded.length===1?'':'s'} listed on the review step and migrate the rest`;
+}
+// Running requires a clean plan, prepared data and, when tables were excluded, explicit confirmation.
+function updateExecuteEnabled(){
+  const m=SchemaBridgeState.migration,plan=m.plan;if(!plan)return;
+  const unconfirmed=(plan.excluded||[]).length>0&&!document.getElementById('skipExcluded').checked;
+  const alreadyRun=m.finalJob?.planId===plan.id;
+  document.getElementById('execute').disabled=plan.issues.length>0||plan.orderedScript||plan.prepared===false||unconfirmed||alreadyRun;
+}
+document.getElementById('skipExcluded').addEventListener('change',updateExecuteEnabled);
 function actions() { const plan = SchemaBridgeState.migration.plan; return plan?.orderedScript ? {} : Object.fromEntries(Array.from(document.getElementById('reportRows').querySelectorAll('select')).map(select => [select.dataset.table,select.value])); }
 document.getElementById('matchAll').addEventListener('click', () => document.getElementById('reportRows').querySelectorAll('select').forEach(select => { if (Array.from(select.options).some(o=>o.value==='DML_ONLY')) select.value='DML_ONLY'; }));
 function clearDownloadLink(){const panel=document.getElementById('downloadHelp'),link=document.getElementById('downloadLink');panel.hidden=true;link.hidden=true;link.removeAttribute('href');document.getElementById('downloadStatus').textContent='';}
@@ -67,4 +90,4 @@ document.getElementById('download').addEventListener('click',async()=>{try{
   const link=document.getElementById('downloadLink');link.href=ticket.url;link.textContent=plan.orderedScript?'Save review package':'Save migration ZIP';link.hidden=false;document.getElementById('downloadStatus').textContent='Download link ready. It expires in two minutes; click the link to save the ZIP.';
 }catch(e){clearDownloadLink();error(e.message);}finally{document.getElementById('download').disabled=false;}});
 document.getElementById('downloadLink').addEventListener('click',()=>{setTimeout(()=>{clearDownloadLink();document.getElementById('downloadStatus').textContent='Download requested. If it did not start, prepare a fresh link.';document.getElementById('downloadHelp').hidden=false;},0);});
-document.getElementById('execute').addEventListener('click',async()=>{ try { document.getElementById('execute').disabled=true; SchemaBridgeState.migration.finalJob=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/execute',{target:connection('target'),actions:actions()})).json(); document.getElementById('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);document.getElementById('execute').disabled=false;} });
+document.getElementById('execute').addEventListener('click',async()=>{ try { document.getElementById('execute').disabled=true; SchemaBridgeState.migration.finalJob=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/execute',{target:connection('target'),actions:actions(),skipExcluded:document.getElementById('skipExcluded').checked})).json(); document.getElementById('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);updateExecuteEnabled();} });
