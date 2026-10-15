@@ -130,6 +130,36 @@ final class RevertRows {
         return rows;
     }
 
+    /** Spot-checks a loaded table: up to {@code samples} staged rows, spread evenly through the file, are looked up
+     * by key in the target and compared value by value, LOBs included. Returns how many rows were compared, or -1
+     * when the table has no non-null scalar primary key to look rows up by. */
+    static long sample(Connection c, Table table, String schema, Dialect dialect, Path staged, long rows, int samples,
+                       MigrationOptions options, TransferProgress progress) throws Exception {
+        Table key;
+        try { key = keyTable(table, dialect); } catch (IllegalArgumentException | NoSuchElementException e) { return -1; }
+        String where = String.join(" AND ", key.columns().stream().map(column -> column.name().sql(dialect) + "=?").toList());
+        String select = "SELECT " + SqlWriter.names(table.columns().stream().map(Column::name).toList(), dialect) + " FROM " + qualified(schema, table.name(), dialect) + " WHERE " + where;
+        long every = Math.max(1, rows / Math.max(1, samples)), line = 0, checked = 0;
+        int[] keyIndexes = key.columns().stream().mapToInt(column -> table.columns().indexOf(column)).toArray();
+        try (PreparedStatement query = c.prepareStatement(select); BufferedReader input = Files.newBufferedReader(staged)) {
+            query.setQueryTimeout(options.queryTimeoutSeconds()); progress.statement = query;
+            String text;
+            while ((text = input.readLine()) != null) {
+                if (line++ % every != 0) continue;
+                progress.check(); RowStore.Cell[] row = RowStore.JSON.readValue(text, RowStore.Cell[].class);
+                RowStore.Cell[] keys = new RowStore.Cell[keyIndexes.length];
+                for (int i = 0; i < keys.length; i++) keys[i] = row[keyIndexes[i]];
+                RowStore.bind(query, keys, key, dialect, staged.getParent(), new ArrayList<>());
+                try (ResultSet r = query.executeQuery()) {
+                    if (!r.next() || !matches(r, row, table, staged.getParent()) || r.next())
+                        throw new IllegalArgumentException("Target content sample check failed for " + table.name().in(dialect) + "; transaction will roll back");
+                }
+                checked++;
+            }
+        } finally { progress.statement = null; }
+        return checked;
+    }
+
     private static boolean matches(ResultSet r, RowStore.Cell[] cells, Table table, Path directory) throws Exception {
         for (int i = 0; i < cells.length; i++) {
             RowStore.Cell cell = cells[i]; int index = i + 1;

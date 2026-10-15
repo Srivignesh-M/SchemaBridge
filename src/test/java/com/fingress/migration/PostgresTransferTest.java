@@ -60,6 +60,8 @@ class PostgresTransferTest {
             try(ResultSet r=s.executeQuery("SELECT COUNT(*) FROM ((SELECT * FROM "+table(sourceSchema)+" EXCEPT ALL SELECT * FROM "+table(targetSchema)+") UNION ALL (SELECT * FROM "+table(targetSchema)+" EXCEPT ALL SELECT * FROM "+table(sourceSchema)+")) differences")){r.next();assertEquals(0,r.getLong(1));}
             // The serial column became an identity that continues after the copied ids.
             try(ResultSet r=s.executeQuery("INSERT INTO "+table(targetSchema)+"(ext) VALUES(NULL) RETURNING id, created IS NOT NULL, since")){r.next();assertEquals(4,r.getInt(1));assertTrue(r.getBoolean(2));assertEquals("1900-01-01",r.getString(3));}
+            // Revert refuses a created table holding rows it did not load, so take the probe row out again.
+            s.execute("DELETE FROM "+table(targetSchema)+" WHERE id=4");
             try(ResultSet r=s.executeQuery("SELECT data_type, character_maximum_length FROM information_schema.columns WHERE table_schema='"+targetSchema+"' AND table_name='items' AND column_name='note'")){r.next();assertEquals("character varying",r.getString(1));r.getInt(2);assertTrue(r.wasNull(),"note must stay unbounded");}
         }
         reverted(job);assertFalse(db.tables(connection,targetSchema).contains("items"));
@@ -280,5 +282,181 @@ class PostgresTransferTest {
             long elapsedMs=(System.nanoTime()-startNanos)/1_000_000;
             assertTrue(elapsedMs<4000,"Expected the 1s read timeout to fire well before the 5s server-side sleep completed; took "+elapsedMs+"ms");
         } finally { DatabaseGateway.configure(null); }
+    }
+    // ---- Parallel readers, binary transfer, sampled verification and direct transfer (live PostgreSQL) ----
+    String q(String schema,String table){return quote(schema)+"."+quote(table);}
+    long count(String schema,String table)throws Exception{try(Connection c=db.connect(connection);Statement s=c.createStatement();ResultSet r=s.executeQuery("SELECT COUNT(*) FROM "+q(schema,table))){r.next();return r.getLong(1);}}
+    long differences(String table)throws Exception{
+        String a=q(sourceSchema,table),b=q(targetSchema,table);
+        try(Connection c=db.connect(connection);Statement s=c.createStatement();ResultSet r=s.executeQuery("SELECT COUNT(*) FROM ((SELECT * FROM "+a+" EXCEPT ALL SELECT * FROM "+b+") UNION ALL (SELECT * FROM "+b+" EXCEPT ALL SELECT * FROM "+a+")) d")){r.next();return r.getLong(1);}
+    }
+    JobView awaitJob(JobView job)throws Exception{long deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(5);while(Set.of("RUNNING","QUEUED").contains(job.state())&&System.nanoTime()<deadline){Thread.sleep(25);job=service.job(job.id());}return job;}
+    PlanRequest analysis(List<String> tables,Map<String,TableSelection> selections,boolean metadataOnly){return new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,targetSchema,null,connection,sourceSchema,tables,true,connection,null,selections,metadataOnly);}
+    void documents()throws Exception{
+        sql("CREATE TABLE "+q(sourceSchema,"parent")+"(id SERIAL PRIMARY KEY, label VARCHAR, doc BYTEA, meta JSONB, at TIME(6), amount NUMERIC(20,6), ext UUID, created TIMESTAMPTZ DEFAULT now())");
+        sql("INSERT INTO "+q(sourceSchema,"parent")+"(label,doc,meta,at,amount,ext) SELECT 'row '||n, decode(repeat(md5(n::text),400),'hex'), jsonb_build_object('n',n,'tags',jsonb_build_array('a','b')), '23:59:59.123456'::time - (n||' seconds')::interval, n*1.000001, gen_random_uuid() FROM generate_series(1,300) n");
+        sql("INSERT INTO "+q(sourceSchema,"parent")+"(label,doc,at) VALUES('nulls',NULL,'24:00:00')");
+        sql("CREATE TABLE "+q(sourceSchema,"child")+"(id BIGINT PRIMARY KEY, parent_id INTEGER REFERENCES "+q(sourceSchema,"parent")+"(id), note TEXT)");
+        sql("INSERT INTO "+q(sourceSchema,"child")+" SELECT n, 1+(n%300), repeat('x',n%50000) FROM generate_series(1,500) n");
+        for(int t=0;t<4;t++){sql("CREATE TABLE "+q(sourceSchema,"small"+t)+"(id INTEGER PRIMARY KEY, v VARCHAR(10))");sql("INSERT INTO "+q(sourceSchema,"small"+t)+" SELECT n, 'v'||n FROM generate_series(1,"+(100*(t+1))+") n");}
+    }
+    List<String> documentTables(){return List.of("parent","child","small0","small1","small2","small3");}
+    Map<String,Action> createAll(PlanView plan){Map<String,Action> actions=new LinkedHashMap<>();plan.tables().forEach(t->actions.put(t.table(),Action.CREATE_AND_LOAD));return actions;}
+
+    @Test void exportedSnapshotIsSharedBetweenConnections()throws Exception{
+        sql("CREATE TABLE "+table(sourceSchema)+"(id INTEGER)");sql("INSERT INTO "+table(sourceSchema)+" VALUES(1)");
+        try(Connection first=db.connect(connection);Connection second=db.connect(connection)){
+            db.snapshot(first,Dialect.POSTGRESQL);String snapshot=db.exportSnapshot(first,Dialect.POSTGRESQL);assertNotNull(snapshot);
+            sql("INSERT INTO "+table(sourceSchema)+" VALUES(2)"); // committed after the snapshot
+            db.snapshot(second,Dialect.POSTGRESQL);db.importSnapshot(second,snapshot);
+            try(Statement s=second.createStatement();ResultSet r=s.executeQuery("SELECT COUNT(*) FROM "+table(sourceSchema))){r.next();assertEquals(1,r.getLong(1),"the importing connection sees the exporter's snapshot");}
+            first.rollback();second.rollback();
+        }
+    }
+    @Test void parallelReadersStageEveryTableAndBinaryTransferKeepsValuesExact()throws Exception{
+        documents();
+        PreparationView p=service.prepare(analysis(documentTables(),Map.of(),false));long deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(5);
+        while(Set.of("QUEUED","PREPARING").contains(p.state())&&System.nanoTime()<deadline){Thread.sleep(25);p=service.preparation(p.id());}
+        assertEquals("READY",p.state(),p.message());
+        assertEquals(documentTables(),p.plan().tables().stream().map(TableReport::table).toList());
+        JobView job=awaitJob(service.execute(p.plan().id(),new ExecuteRequest(connection,createAll(p.plan()))));
+        assertEquals("SUCCEEDED",job.state(),job.message());
+        for(String table:documentTables())assertEquals(0,differences(table),table+" must arrive unchanged, including time(6) microseconds and 24:00:00");
+        job.tables().forEach(t->assertEquals("FINGERPRINT",t.validation().method(),t.table()));
+    }
+    @Test void largeTablesAreSampledOnPostgres()throws Exception{
+        long saved=MigrationService.FULL_VERIFY_BYTES;MigrationService.FULL_VERIFY_BYTES=0;
+        try{
+            documents();
+            PreparationView p=service.prepare(analysis(List.of("parent"),Map.of(),false));long deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(5);
+            while(Set.of("QUEUED","PREPARING").contains(p.state())&&System.nanoTime()<deadline){Thread.sleep(25);p=service.preparation(p.id());}
+            JobView job=awaitJob(service.execute(p.plan().id(),new ExecuteRequest(connection,createAll(p.plan()))));
+            assertEquals("SUCCEEDED",job.state(),job.message());
+            ValidationReport v=job.tables().getFirst().validation();assertEquals("SAMPLED",v.method());assertEquals(301,v.rowsChecked());
+        }finally{MigrationService.FULL_VERIFY_BYTES=saved;}
+    }
+    @Test @EnabledIfSystemProperty(named="migration.continuationBenchmark", matches="true")
+    void manyTablesStagedAndDirectBenchmark() throws Exception {
+        List<String> tables = new ArrayList<>(); long expectedRows = 0;
+        for (int i = 0; i < 200; i++) {
+            String name = "bench_" + i; tables.add(name);
+            int rows = i == 199 ? 600 : 100, width = i == 199 ? 32768 : 160;
+            expectedRows += rows;
+            sql("CREATE TABLE " + q(sourceSchema, name) + "(id INTEGER PRIMARY KEY, payload BYTEA)");
+            sql("INSERT INTO " + q(sourceSchema, name) + " SELECT n, decode(repeat('ab'," + width + "),'hex') FROM generate_series(1," + rows + ") n");
+        }
+        List<Map<String,Object>> results = new ArrayList<>(); int previousReaders = SourceExtraction.MAX_READERS;
+        try {
+            for (String mode : List.of("staged-1-reader", "staged-3-readers", "direct")) {
+                boolean direct = mode.equals("direct"); SourceExtraction.MAX_READERS = mode.equals("staged-1-reader") ? 1 : 3;
+                long start = System.nanoTime();
+                PlanView plan = service.create(new PlanRequest(Dialect.POSTGRESQL, Dialect.POSTGRESQL, targetSchema, null, connection, sourceSchema,
+                        tables, true, connection, null, Map.of(), direct));
+                double preparation = (System.nanoTime() - start) / 1e9;
+                JobView job = awaitJob(service.execute(plan.id(), new ExecuteRequest(connection, createAll(plan), false, direct ? connection : null, direct)));
+                double total = (System.nanoTime() - start) / 1e9;
+                assertEquals("SUCCEEDED", job.state(), mode + ": " + job.message() + " at " + job.progress().table()); assertEquals(expectedRows, job.progress().rowsCommitted());
+                for (String name : tables) {
+                    try (Connection c = db.connect(connection); Statement s = c.createStatement(); ResultSet r = s.executeQuery(
+                            "SELECT COUNT(*) FROM ((SELECT * FROM " + q(sourceSchema,name) + " EXCEPT ALL SELECT * FROM " + q(targetSchema,name)
+                            + ") UNION ALL (SELECT * FROM " + q(targetSchema,name) + " EXCEPT ALL SELECT * FROM " + q(sourceSchema,name) + ")) differences")) {
+                        r.next(); assertEquals(0, r.getLong(1), name);
+                    }
+                }
+                results.add(Map.of("mode", mode, "tables", tables.size(), "rows", expectedRows, "preparationSeconds", preparation, "totalSeconds", total));
+                for (String name : tables) sql("DROP TABLE " + q(targetSchema,name));
+                service.delete(plan.id());
+            }
+        } finally { SourceExtraction.MAX_READERS = previousReaders; }
+        Path output = Path.of("target/benchmarks/continuation-many-tables.json"); Files.createDirectories(output.getParent());
+        json.writerWithDefaultPrettyPrinter().writeValue(output.toFile(), results);
+    }
+
+    @Test void directTransferHonoursDefinitionsOnlyAfterRestart() throws Exception {
+        sql("CREATE TABLE " + table(sourceSchema) + "(id INTEGER PRIMARY KEY)");
+        sql("INSERT INTO " + table(sourceSchema) + " VALUES (1),(2)");
+        PlanView plan = service.create(new PlanRequest(Dialect.POSTGRESQL, Dialect.POSTGRESQL, targetSchema, null, connection, sourceSchema,
+                List.of("items"), false, connection, null, Map.of(), true));
+        service.close(); service = new MigrationService(db, json, work.toString(), 2_000_000, 30);
+        JobView job = awaitJob(service.execute(plan.id(), new ExecuteRequest(connection, createAll(plan), false, connection, true)));
+        assertEquals("SUCCEEDED", job.state(), job.message());
+        assertEquals(0, count(targetSchema, "items")); assertEquals(0, job.progress().rowsCommitted());
+    }
+
+    @Test void directTransferCountsEarlierCommitsAgainstBudgetOnResume() throws Exception {
+        for (String name : List.of("first", "second")) {
+            sql("CREATE TABLE " + q(sourceSchema, name) + "(id INTEGER PRIMARY KEY)");
+            sql("INSERT INTO " + q(sourceSchema, name) + " VALUES (1),(2),(3)");
+        }
+        PlanView plan = service.create(new PlanRequest(Dialect.POSTGRESQL, Dialect.POSTGRESQL, targetSchema, null, connection, sourceSchema,
+                List.of("first", "second"), true, connection, MigrationOptions.defaults(4), Map.of(), true));
+        JobView job = awaitJob(service.execute(plan.id(), new ExecuteRequest(connection, createAll(plan), false, connection, true)));
+        assertEquals("FAILED", job.state()); assertEquals(3, job.progress().rowsCommitted());
+        assertEquals(3, count(targetSchema, "first")); assertEquals(0, count(targetSchema, "second"));
+        service.close(); service = new MigrationService(db, json, work.toString(), 2_000_000, 30);
+        JobView resumed = awaitJob(service.resume(job.id(), connection, connection));
+        assertEquals("FAILED", resumed.state()); assertTrue(resumed.message().contains("total row limit"), resumed.message());
+        assertEquals(3, count(targetSchema, "first")); assertEquals(0, count(targetSchema, "second"));
+    }
+
+    @Test void directTransferEnforcesTotalRowsAndByteLimit() throws Exception {
+        sql("CREATE TABLE " + table(sourceSchema) + "(id INTEGER PRIMARY KEY, payload TEXT)");
+        sql("INSERT INTO " + table(sourceSchema) + " SELECT n, repeat('x',1000) FROM generate_series(1,3) n");
+        for (boolean rowLimit : List.of(true, false)) {
+            MigrationOptions options = new MigrationOptions(rowLimit ? 2L : 100L, rowLimit ? 100000L : 100L, 0L, null, null, null, null, null, true, true);
+            PlanView plan = service.create(new PlanRequest(Dialect.POSTGRESQL, Dialect.POSTGRESQL, targetSchema, null, connection, sourceSchema,
+                    List.of("items"), true, connection, options, Map.of(), true));
+            JobView job = awaitJob(service.execute(plan.id(), new ExecuteRequest(connection, createAll(plan), false, connection, true)));
+            assertEquals("FAILED", job.state(), job.message());
+            assertTrue(job.message().contains(rowLimit ? "total row limit" : "byte limit"), job.message());
+            assertEquals(0, count(targetSchema, "items"), "Failed table must roll back");
+            sql("DROP TABLE " + table(targetSchema));
+        }
+    }
+
+    @Test void directTransferStreamsTablesWithoutStaging()throws Exception{
+        documents();
+        PlanView plan=service.create(analysis(documentTables(),Map.of(),true));
+        assertFalse(plan.prepared());
+        JobView job=awaitJob(service.execute(plan.id(),new ExecuteRequest(connection,createAll(plan),false,connection,true)));
+        assertEquals("SUCCEEDED",job.state(),job.message());assertTrue(job.direct());
+        assertTrue(job.progress().phaseSeconds().keySet().containsAll(List.of("COPYING","FINGERPRINTING","COMMITTING")));
+        for(String table:documentTables())assertEquals(0,differences(table),table+" must arrive unchanged");
+        job.tables().forEach(t->assertEquals("STREAMED",t.validation().method(),t.table()));
+        assertEquals(301,job.tables().stream().filter(t->t.table().equals("parent")).findFirst().orElseThrow().rows());
+        try(Connection c=db.connect(connection);Statement s=c.createStatement();ResultSet r=s.executeQuery("INSERT INTO "+q(targetSchema,"parent")+"(label) VALUES('next') RETURNING id")){r.next();assertEquals(302,r.getInt(1),"the identity continues after the streamed ids");}
+        sql("DELETE FROM "+q(targetSchema,"parent")+" WHERE id=302");
+        // Foreign keys are added after loading, so the child must reference the streamed parent.
+        try(Connection c=db.connect(connection);Statement s=c.createStatement()){assertThrows(SQLException.class,()->s.execute("INSERT INTO "+q(targetSchema,"child")+" VALUES(9999,99999,'orphan')"));}
+        reverted(job);
+        for(String table:documentTables())assertFalse(db.tables(connection,targetSchema).contains(table),table+" must be dropped by revert");
+    }
+    @Test void directTransferHonoursRenamesAndRowLimits()throws Exception{
+        documents();
+        var selection=new TableSelection(List.of("id","v"),Map.of("v","value"),List.of(),"renamed",50);
+        PlanView plan=service.create(analysis(List.of("small3"),Map.of("small3",selection),true));
+        JobView job=awaitJob(service.execute(plan.id(),new ExecuteRequest(connection,Map.of("renamed",Action.CREATE_AND_LOAD),false,connection,true)));
+        assertEquals("SUCCEEDED",job.state(),job.message());
+        assertEquals(50,count(targetSchema,"renamed"));
+        try(Connection c=db.connect(connection);Statement s=c.createStatement();ResultSet r=s.executeQuery("SELECT COUNT(*) FROM "+q(targetSchema,"renamed")+" t JOIN "+q(sourceSchema,"small3")+" s ON s.id=t.id AND s.v=t.value")){r.next();assertEquals(50,r.getLong(1));}
+    }
+    @Test void directTransferRefusesWhatItCannotDoAndResumesOnlyWithTheSource()throws Exception{
+        documents();
+        sql("CREATE TABLE "+q(targetSchema,"small0")+"(id INTEGER PRIMARY KEY, v VARCHAR(10))");
+        var filtered=new TableSelection(null,null,List.of(new RowFilter("id",">=","10")));
+        PlanView plan=service.create(analysis(List.of("small0","small1"),Map.of("small1",filtered),true));
+        var refused=assertThrows(IllegalArgumentException.class,()->service.execute(plan.id(),new ExecuteRequest(connection,Map.of("small0",Action.DML_ONLY,"small1",Action.CREATE_AND_LOAD),false,connection,true)));
+        assertTrue(refused.getMessage().contains("small0 (existing table)")&&refused.getMessage().contains("small1 (row filters)"),refused.getMessage());
+        var other=new ConnectionSpec(Dialect.POSTGRESQL,"localhost",connection.port(),connection.database(),connection.username(),connection.password());
+        assertThrows(IllegalArgumentException.class,()->service.execute(plan.id(),new ExecuteRequest(connection,Map.of("small0",Action.SKIP,"small1",Action.SKIP),false,other,true)));
+        // A source table dropped after analysis fails the run before any write; resuming needs the source again.
+        PlanView fresh=service.create(analysis(List.of("small2"),Map.of(),true));
+        sql("ALTER TABLE "+q(sourceSchema,"small2")+" RENAME TO small2_moved");
+        JobView failed=awaitJob(service.execute(fresh.id(),new ExecuteRequest(connection,Map.of("small2",Action.CREATE_AND_LOAD),false,connection,true)));
+        assertEquals("FAILED",failed.state());assertTrue(failed.message().contains("no longer exists"),failed.message());assertTrue(failed.resumable());
+        assertThrows(IllegalArgumentException.class,()->service.resume(failed.id(),connection));
+        sql("ALTER TABLE "+q(sourceSchema,"small2_moved")+" RENAME TO small2");
+        JobView resumed=awaitJob(service.resume(failed.id(),connection,connection));
+        assertEquals("SUCCEEDED",resumed.state(),resumed.message());assertEquals(0,differences("small2"));
     }
 }

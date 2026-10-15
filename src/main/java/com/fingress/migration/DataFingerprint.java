@@ -48,10 +48,14 @@ record DataFingerprint(long count, BigInteger sum) {
     }
     static DataFingerprint target(Connection connection,Table table,String schema,Dialect dialect,MigrationOptions options,TransferProgress progress)throws Exception{
         DataFingerprint result=empty();
-        try(Statement statement=connection.createStatement()){
+        String query="SELECT "+SqlWriter.names(table.columns().stream().map(Column::name).toList(),dialect)+" FROM "+qualified(schema,table.name(),dialect);
+        try(PreparedStatement statement=connection.prepareStatement(query)){
+            // A forced server-prepared result avoids hex expansion for PostgreSQL bytea receipts.
+            // TIME/TIMETZ remain text via DatabaseGateway's connection configuration.
+            if(dialect==Dialect.POSTGRESQL&&table.columns().stream().anyMatch(c->c.type().kind().equals("BINARY"))&&statement.isWrapperFor(org.postgresql.PGStatement.class))
+                statement.unwrap(org.postgresql.PGStatement.class).setPrepareThreshold(-1);
             progress.statement=statement;statement.setFetchSize(options.fetchSize());statement.setQueryTimeout(options.queryTimeoutSeconds());
-            String query="SELECT "+SqlWriter.names(table.columns().stream().map(Column::name).toList(),dialect)+" FROM "+qualified(schema,table.name(),dialect);
-            try(ResultSet rs=DatabaseGateway.readable(()->statement.executeQuery(query),table,dialect)){
+            try(ResultSet rs=DatabaseGateway.readable(statement::executeQuery,table,dialect)){
                 while(DatabaseGateway.readable(rs::next,table,dialect)){
                     progress.check();MessageDigest row=digest();
                     for(int i=0;i<table.columns().size();i++){

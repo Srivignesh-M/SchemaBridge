@@ -17,12 +17,15 @@ final class RowStore {
     record Cell(String type, String value, String file) {}
     @FunctionalInterface interface DiskSpaceProbe { long usableSpace(Path path) throws IOException; }
     static final DiskSpaceProbe SYSTEM_DISK_SPACE = path -> Files.getFileStore(path).getUsableSpace();
-    static Cell[] read(ResultSet rs, Table source, Dialect target, Path directory, MigrationOptions options, TransferProgress progress, DiskSpaceProbe diskSpace) throws Exception {
+    /** sidecarPrefix (8 hex digits) starts every LOB file name of one table, so that table's files can be found
+     * and removed without touching other tables written at the same time; null gives fully random names. */
+    static Cell[] read(ResultSet rs, Table source, Dialect target, Path directory, String sidecarPrefix, MigrationOptions options, TransferProgress progress, DiskSpaceProbe diskSpace) throws Exception {
         Cell[] row = new Cell[source.columns().size()];
         for (int i=0;i<row.length;i++) {
             String kind = source.columns().get(i).type().kind(); int index=i+1;
             if (kind.equals("BINARY") || kind.equals("TEXT")) {
-                String file = "lob-"+UUID.randomUUID(); Path path=directory.resolve(file);
+                String uuid = UUID.randomUUID().toString();
+                String file = "lob-" + (sidecarPrefix == null ? uuid : sidecarPrefix + uuid.substring(8)); Path path=directory.resolve(file);
                 if (kind.equals("BINARY")) {
                     InputStream input = rs.getBinaryStream(index);
                     if(input==null) { row[i]=new Cell(kind,null,null); continue; }

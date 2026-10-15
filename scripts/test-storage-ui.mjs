@@ -12,6 +12,8 @@ let plans=[
   plan('cccccccc','SUCCEEDED'),
   plan('dddddddd','RECOVERY_REQUIRED',{uncertain:true}),
   plan('eeeeeeee','RUNNING',{active:true}),
+  plan('ffffffff','INTERRUPTED',{tables:5,tablesTotal:9,bytes:2_000_000_000}),
+  plan('abababab','INTERRUPTED',{tables:2,tablesTotal:9,active:true}),
 ];
 const reply=body=>({ok:true,json:async()=>body,text:async()=>''});
 window.fetch=async(path,options={})=>{
@@ -34,23 +36,30 @@ await wait(25);
 
 // Every saved plan is listed, including ones that never ran.
 await window.refreshStorage();
-assert.equal(el('storagePlans').hidden,false);assert.equal(rows().length,5);
+assert.equal(el('storagePlans').hidden,false);assert.equal(rows().length,7);
 assert.match(row('aaaaaaaa').textContent,/Not run/);assert.match(row('aaaaaaaa').textContent,/Definitions only/);
 assert.match(row('aaaaaaaa').textContent,/791/);assert.match(row('aaaaaaaa').textContent,/172\.16\.16\.98:5432\/postgres → localhost:5432\/postgres/);
 assert.match(row('bbbbbbbb').textContent,/Data prepared/);assert.match(row('bbbbbbbb').textContent,/620 MB/);
 assert.match(row('cccccccc').textContent,/Completed/);
 const running=row('eeeeeeee').querySelector('button');assert.equal(running.disabled,true);assert.equal(running.textContent,'Running');
 const uncertain=row('dddddddd').querySelector('button');assert.equal(uncertain.textContent,'Review and discard evidence');assert.ok(uncertain.classList.contains('danger'));
-assert.equal(el('deleteUnusedPlans').hidden,false);assert.equal(el('deleteUnusedPlans').textContent,'Delete all plans that never ran (2)');
+assert.equal(el('deleteUnusedPlans').hidden,false);assert.equal(el('deleteUnusedPlans').textContent,'Delete all plans that never ran (3)');
+// Interrupted preparations show how far they got; one being prepared cannot be deleted.
+assert.match(row('ffffffff').textContent,/Interrupted/);assert.match(row('ffffffff').textContent,/5 of 9 staged/);assert.match(row('ffffffff').textContent,/Prepare again with the same selection to continue/);
+const preparing=row('abababab').querySelector('button');assert.equal(preparing.disabled,true);assert.equal(preparing.textContent,'Preparing');assert.match(row('abababab').textContent,/Preparing now/);
+row('ffffffff').querySelector('button').click();await wait(30);
+assert.match(prompts.at(-1),/Delete this interrupted preparation and its 2.0 GB of staged tables/);
+assert.equal(deletes().at(-1),`DELETE /api/plans/${'ffffffff'.padEnd(36,'0')}`);assert.equal(row('ffffffff'),undefined);
+assert.equal(el('deleteUnusedPlans').textContent,'Delete all plans that never ran (2)');
 
 // Cancelling the confirmation deletes nothing.
-confirmAnswer=false;row('cccccccc').querySelector('button').click();await wait(20);
-assert.equal(deletes().length,0);confirmAnswer=true;
+const before=deletes().length;confirmAnswer=false;row('cccccccc').querySelector('button').click();await wait(20);
+assert.equal(deletes().length,before);confirmAnswer=true;
 
 // Deleting the plan open on the migration page also clears it there.
 window.migrationState().plan={id:plans.find(p=>p.id.startsWith('cccccccc')).id};
 row('cccccccc').querySelector('button').click();await wait(30);
-assert.deepEqual(deletes(),[`DELETE /api/plans/${'cccccccc'.padEnd(36,'0')}`]);
+assert.equal(deletes().at(-1),`DELETE /api/plans/${'cccccccc'.padEnd(36,'0')}`);
 assert.equal(window.migrationState().plan,null,'Deleted plan must be cleared from the migration page');
 assert.equal(row('cccccccc'),undefined,'List must refresh after a delete');
 
@@ -62,7 +71,7 @@ assert.equal(deletes().at(-1),`DELETE /api/plans/${'dddddddd'.padEnd(36,'0')}?ac
 // Bulk delete removes only plans that never ran.
 el('deleteUnusedPlans').click();await wait(40);
 assert.match(prompts.at(-1),/Delete 2 plans that never ran \(621 MB/);
-assert.deepEqual(plans.map(p=>p.id.slice(0,8)),['eeeeeeee'],'Only the running plan must remain');
+assert.deepEqual(plans.map(p=>p.id.slice(0,8)),['eeeeeeee','abababab'],'Only the running plan and the preparation in progress must remain');
 assert.equal(el('deleteUnusedPlans').hidden,true);
 
 plans=[];await window.refreshStorage();

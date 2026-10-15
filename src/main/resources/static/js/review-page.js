@@ -49,7 +49,7 @@ function renderPlan() {
     for(const action of table.allowedActions) { const option = document.createElement('option'); option.value = action; option.textContent = ({CREATE_AND_LOAD:'Create + load',DML_ONLY:'DML only',SKIP:'Skip table'})[action]; select.append(option); }
     select.value = table.status === 'MATCH' || table.status === 'MISMATCH' ? 'SKIP' : 'CREATE_AND_LOAD'; td.append(select); document.getElementById('reportRows').append(tr);
   }
-  document.getElementById('execute').hidden = !plan.targetChecked || plan.orderedScript; updateExecuteEnabled(); document.getElementById('download').disabled = plan.prepared===false; document.getElementById('prepareData').hidden=plan.prepared!==false;
+  document.getElementById('execute').hidden = !plan.targetChecked || plan.orderedScript; updateExecuteEnabled(); document.getElementById('download').disabled = plan.prepared===false; renderTransferMethod(plan);
 }
 // Settings are worked out per migration; this states what was chosen so nothing is hidden.
 function transferSummary(plan){
@@ -69,12 +69,24 @@ function renderExcluded(excluded){
   document.getElementById('skipExcludedLabel').hidden=!excluded.length;
   document.getElementById('skipExcludedText').textContent=`Skip the ${excluded.length} excluded table${excluded.length===1?'':'s'} listed on the review step and migrate the rest`;
 }
-// Running requires a clean plan, prepared data and, when tables were excluded, explicit confirmation.
+// Direct transfer streams PostgreSQL to PostgreSQL without a local copy. It needs the source connection used for
+// the analysis, so it is offered for plans analysed in this session; the server enforces its other limits.
+function directAvailable(plan){return plan.sourceDialect==='POSTGRESQL'&&plan.targetDialect==='POSTGRESQL'&&plan.targetChecked&&!plan.orderedScript&&!!SchemaBridgeState.migration.lastRequest?.source;}
+function directSelected(){return !document.getElementById('transferMethod').hidden&&document.querySelector('input[name="transferMethod"]:checked')?.value==='direct';}
+function renderTransferMethod(plan){
+  const available=directAvailable(plan);document.getElementById('transferMethod').hidden=!available;
+  if(!available)document.querySelector('input[name="transferMethod"][value="staged"]').checked=true;
+  // Preparing data is only needed for the staged transfer.
+  document.getElementById('prepareData').hidden=plan.prepared!==false||directSelected();
+  updateExecuteEnabled();
+}
+document.querySelectorAll('input[name="transferMethod"]').forEach(input=>input.addEventListener('change',()=>{const plan=SchemaBridgeState.migration.plan;if(plan)renderTransferMethod(plan);}));
+// Running requires a clean plan, prepared data (or the direct transfer) and, when tables were excluded, explicit confirmation.
 function updateExecuteEnabled(){
   const m=SchemaBridgeState.migration,plan=m.plan;if(!plan)return;
   const unconfirmed=(plan.excluded||[]).length>0&&!document.getElementById('skipExcluded').checked;
   const alreadyRun=m.finalJob?.planId===plan.id;
-  document.getElementById('execute').disabled=plan.issues.length>0||plan.orderedScript||plan.prepared===false||unconfirmed||alreadyRun;
+  document.getElementById('execute').disabled=plan.issues.length>0||plan.orderedScript||(plan.prepared===false&&!directSelected())||unconfirmed||alreadyRun;
 }
 document.getElementById('skipExcluded').addEventListener('change',updateExecuteEnabled);
 function actions() { const plan = SchemaBridgeState.migration.plan; return plan?.orderedScript ? {} : Object.fromEntries(Array.from(document.getElementById('reportRows').querySelectorAll('select')).map(select => [select.dataset.table,select.value])); }
@@ -90,4 +102,4 @@ document.getElementById('download').addEventListener('click',async()=>{try{
   const link=document.getElementById('downloadLink');link.href=ticket.url;link.textContent=plan.orderedScript?'Save review package':'Save migration ZIP';link.hidden=false;document.getElementById('downloadStatus').textContent='Download link ready. It expires in two minutes; click the link to save the ZIP.';
 }catch(e){clearDownloadLink();error(e.message);}finally{document.getElementById('download').disabled=false;}});
 document.getElementById('downloadLink').addEventListener('click',()=>{setTimeout(()=>{clearDownloadLink();document.getElementById('downloadStatus').textContent='Download requested. If it did not start, prepare a fresh link.';document.getElementById('downloadHelp').hidden=false;},0);});
-document.getElementById('execute').addEventListener('click',async()=>{ try { document.getElementById('execute').disabled=true; SchemaBridgeState.migration.finalJob=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/execute',{target:connection('target'),actions:actions(),skipExcluded:document.getElementById('skipExcluded').checked})).json(); document.getElementById('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);updateExecuteEnabled();} });
+document.getElementById('execute').addEventListener('click',async()=>{ try { document.getElementById('execute').disabled=true; SchemaBridgeState.migration.finalJob=await(await api('/plans/'+SchemaBridgeState.migration.plan.id+'/execute',{target:connection('target'),actions:actions(),skipExcluded:document.getElementById('skipExcluded').checked,...(directSelected()?{direct:true,source:SchemaBridgeState.migration.lastRequest.source}:{})})).json(); document.getElementById('jobSection').hidden=false; renderJob(); pollJob(); } catch(e){error(e.message);updateExecuteEnabled();} });

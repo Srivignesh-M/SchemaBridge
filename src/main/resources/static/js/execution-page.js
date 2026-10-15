@@ -1,7 +1,7 @@
-const validationMethodLabel={FINGERPRINT:'Fingerprint (count + SHA-256)',ROW_COUNT:'Row count only',NONE:'No validation'};
+const validationMethodLabel={FINGERPRINT:'Fingerprint (count + SHA-256)',SAMPLED:'Row count + sampled rows compared',STREAMED:'Row counts (direct transfer)',ROW_COUNT:'Row count only',NONE:'No validation'};
 function renderJob(){
   const finalJob = SchemaBridgeState.migration.finalJob;
-  renderProgress('job',finalJob.progress);document.getElementById('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);document.getElementById('resumeJob').hidden=!finalJob.resumable; document.getElementById('jobState').textContent=finalJob.state+' — '+finalJob.message; document.getElementById('jobRows').replaceChildren();
+  renderProgress('job',finalJob.progress);document.getElementById('cancelJob').hidden=!['RUNNING','QUEUED'].includes(finalJob.state);document.getElementById('resumeJob').hidden=!finalJob.resumable;document.getElementById('resumeJob').textContent=finalJob.direct?'Resume with current source and target connections':'Resume with current target connection'; document.getElementById('jobState').textContent=finalJob.state+' — '+finalJob.message; document.getElementById('jobRows').replaceChildren();
   for(const table of finalJob.tables){
     const tr=document.createElement('tr');[table.table,table.action,table.status,table.rows].forEach(value=>cell(tr,value));
     const details=cell(tr,'');
@@ -25,16 +25,33 @@ document.getElementById('jobDownload').addEventListener('click',()=>save(new Blo
 document.getElementById('prepareData').addEventListener('click',async()=>{
   const m = SchemaBridgeState.migration;
   if(!m.lastRequest)return;try{
-  const version=m.requestVersion;const previousPlan=m.plan.id;const request={...m.lastRequest,metadataOnly:false};
-  const started=await(await api('/preparations',request)).json();m.preparationId=started.id;document.getElementById('preparationSection').hidden=false;document.getElementById('cancelPreparation').hidden=false;document.getElementById('prepareData').disabled=true;
-  async function poll(){try{const current=await(await api('/preparations/'+started.id,undefined,'GET')).json();document.getElementById('preparationState').textContent=current.message;renderProgress('preparation',current.progress);
-    if(['QUEUED','PREPARING'].includes(current.state)){if(currentPageId()==='migration')m.preparationPoll=setTimeout(poll,1000);return;}
-    document.getElementById('cancelPreparation').hidden=true;document.getElementById('prepareData').disabled=false;if(current.state==='READY'&&version===m.requestVersion){m.plan=current.plan;renderPlan();document.getElementById('preview').textContent=await(await api('/plans/'+m.plan.id+'/preview',undefined,'GET')).text();await api('/plans/'+previousPlan,undefined,'DELETE');}
+  const request={...m.lastRequest,metadataOnly:false};
+  const started=await(await api('/preparations',request)).json();
+  m.preparationId=started.id;m.preparationContext={version:m.requestVersion,previousPlan:m.plan.id};
+  document.getElementById('preparationSection').hidden=false;document.getElementById('cancelPreparation').hidden=false;document.getElementById('prepareData').disabled=true;
+  await pollPreparation();
+}catch(e){error(e.message);document.getElementById('prepareData').disabled=false;}});
+// Follows the running preparation. Leaving the migration page pauses it (shell.js resumes it on return),
+// and a failed request is retried instead of silently ending the updates.
+async function pollPreparation(){
+  const m=SchemaBridgeState.migration,id=m.preparationId;clearTimeout(m.preparationPoll);m.preparationPoll=null;
+  if(!id||m.preparationInFlight)return;
+  const again=delay=>{if(currentPageId()==='migration'&&m.preparationId===id)m.preparationPoll=setTimeout(pollPreparation,delay);};
+  let current;m.preparationInFlight=true;
+  try{current=await(await api('/preparations/'+id,undefined,'GET')).json();}
+  catch(e){document.getElementById('preparationState').textContent='Lost contact with SchemaBridge; retrying… ('+e.message+')';again(3000);return;}
+  finally{m.preparationInFlight=false;}
+  if(m.preparationId!==id)return;
+  document.getElementById('preparationState').textContent=current.message;renderProgress('preparation',current.progress);
+  if(['QUEUED','PREPARING'].includes(current.state)){again(1000);return;}
+  const {version,previousPlan}=m.preparationContext||{};m.preparationId=null;m.preparationContext=null;
+  document.getElementById('cancelPreparation').hidden=true;document.getElementById('prepareData').disabled=false;
+  try{
+    if(current.state==='READY'&&version===m.requestVersion){m.plan=current.plan;renderPlan();document.getElementById('preview').textContent=await(await api('/plans/'+m.plan.id+'/preview',undefined,'GET')).text();if(previousPlan)await api('/plans/'+previousPlan,undefined,'DELETE');}
     if(current.state==='READY'&&version!==m.requestVersion)await api('/plans/'+current.plan.id,undefined,'DELETE');
     if(current.state==='FAILED')error(current.message);
-  }catch(e){document.getElementById('prepareData').disabled=false;error(e.message);}}
-  await poll();
-}catch(e){error(e.message);document.getElementById('prepareData').disabled=false;}});
+  }catch(e){error(e.message);}
+}
 document.getElementById('cancelPreparation').addEventListener('click',async()=>{try{const id=SchemaBridgeState.migration.preparationId;if(id)await api('/preparations/'+id+'/cancel',{});}catch(e){error(e.message);}});
 document.getElementById('cancelJob').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/cancel',{})).json();renderJob();}catch(e){error(e.message);}});
-document.getElementById('resumeJob').addEventListener('click',async()=>{try{SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+SchemaBridgeState.migration.finalJob.id+'/resume',connection('target'))).json();renderJob();pollJob();}catch(e){error(e.message);}});
+document.getElementById('resumeJob').addEventListener('click',async()=>{try{const job=SchemaBridgeState.migration.finalJob;SchemaBridgeState.migration.finalJob=await(await api('/jobs/'+job.id+'/resume',job.direct?{target:connection('target'),source:connection('source')}:connection('target'))).json();renderJob();pollJob();}catch(e){error(e.message);}});

@@ -127,9 +127,14 @@ public final class Model {
             this(id, sourceDialect, targetDialect, targetSchema, tables, issues, warnings, targetChecked, expiresAt, orderedScript, statements, prepared, options, List.of(), false, Map.of());
         }
     }
-    public record ExecuteRequest(ConnectionSpec target, Map<String, Action> actions, boolean skipExcluded) {
-        public ExecuteRequest(ConnectionSpec target, Map<String, Action> actions) { this(target, actions, false); }
+    /** direct streams each table from source to target (PostgreSQL to PostgreSQL) instead of loading staged data;
+     * it needs the source connection, which is never saved. */
+    public record ExecuteRequest(ConnectionSpec target, Map<String, Action> actions, boolean skipExcluded, ConnectionSpec source, boolean direct) {
+        public ExecuteRequest(ConnectionSpec target, Map<String, Action> actions) { this(target, actions, false, null, false); }
+        public ExecuteRequest(ConnectionSpec target, Map<String, Action> actions, boolean skipExcluded) { this(target, actions, skipExcluded, null, false); }
     }
+    /** Resuming a direct transfer also needs the source connection again. */
+    public record ResumeRequest(ConnectionSpec target, ConnectionSpec source) {}
     /** Per-table validation detail (improvement-plan P4). method: FINGERPRINT (typed data: full-table
      * row count + order-independent SHA-256 content aggregate), ROW_COUNT (SQL-input: count only, not
      * fingerprinted), or NONE (validateData=false). rowsChecked is the full target table's row count
@@ -143,17 +148,19 @@ public final class Model {
      * on the next plan creation. This is a read-only preview; nothing is deleted by viewing it.
      * orphanedDirectories are work-directory entries with no matching tracked plan: per README, files
      * left behind by a killed process are not automatically recovered or removed. */
+    /** tablesTotal is set for an interrupted preparation (state INTERRUPTED): tables is then how many are staged. */
     public record PlanStorage(String id, String state, long bytes, String expiresAt, boolean reclaimable,
-                              String source, String target, int tables, boolean prepared, boolean active, boolean uncertain) {}
+                              String source, String target, int tables, boolean prepared, boolean active, boolean uncertain, int tablesTotal) {}
     public record StorageView(long stagedBytes, long freeDiskBytes, long reclaimableBytes, List<PlanStorage> plans, List<String> orphanedDirectories) {}
     public record Progress(String phase, String table, long rowsRead, long rowsSent, long rowsCommitted, long bytes,
                            long totalRows, long elapsedSeconds, double rowsPerSecond, Long remainingSeconds, boolean cancelRequested,
-                           long tablesDone, long tablesTotal) {}
+                           long tablesDone, long tablesTotal, long tablesActive, Double bytesPerSecond,
+                           long phaseElapsedSeconds, Map<String,Double> phaseSeconds) {}
     public record RevertTable(String table, String action, long rows, String status) {}
     public record RevertView(String state, String message, List<RevertTable> tables, Progress progress) {}
     public record RevertPreview(String token, String jobId, String target, List<RevertTable> tables, String expiresAt) {}
     public record RevertRequest(ConnectionSpec target, String token) {}
-    public record JobView(String id, String state, List<TableResult> tables, String message, String planId, Progress progress, boolean resumable, MigrationOptions options, RevertView revert) {}
+    public record JobView(String id, String state, List<TableResult> tables, String message, String planId, Progress progress, boolean resumable, MigrationOptions options, RevertView revert, boolean direct) {}
     public record PreparationView(String id, String state, String message, Progress progress, PlanView plan) {}
     public static String qualified(String schema, Name table, Dialect target) { return quote(schema) + "." + table.sql(target); }
 }

@@ -151,6 +151,11 @@
     <div class="section-heading"><div><span class="eyebrow">STEP 4 OF 4</span><h2>Export or run migration</h2><p class="muted">Start the selected action, then follow its progress and download the report.</p></div></div>
     <section id="outputActions" class="card" hidden>
       <div class="section-title"><div><h2 id="outputTitle">Ready for your next step</h2><p id="outputDescription" class="muted"></p></div><button type="button" class="secondary" data-back="3">Back to review</button></div>
+      <fieldset id="transferMethod" class="transfer-method" hidden>
+        <legend>Transfer method</legend>
+        <label><input type="radio" name="transferMethod" value="staged" checked><span><strong>Staged</strong> — prepare a local copy first, then load it. Full verification, revert of every load, resume after interruptions and SQL download.</span></label>
+        <label><input type="radio" name="transferMethod" value="direct"><span><strong>Direct</strong> — stream each table from source to target with no local copy and no preparation step. Fastest; creates new tables only, without row filters, and verifies by row counts.</span></label>
+      </fieldset>
       <label id="skipExcludedLabel" class="inline skip-excluded" hidden><input type="checkbox" id="skipExcluded"><span id="skipExcludedText">Skip the excluded tables and migrate the rest</span></label>
       <div class="action-bar"><button id="reportDownload" class="secondary" type="button">Download review report</button><div><button id="prepareData" class="secondary" type="button" hidden>Prepare table data</button><button id="download" class="secondary" type="button">Prepare ZIP download</button><button id="execute" type="button">Run selected plan</button></div></div>
       <div id="downloadHelp" class="download-help" hidden><p id="downloadStatus" role="status" aria-live="polite"></p><a id="downloadLink" class="download-link" href="" hidden></a></div>

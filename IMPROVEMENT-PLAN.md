@@ -1,5 +1,41 @@
 # SchemaBridge improvement plan
 
+## Transfer continuation (2026-10-15)
+
+### Direct COPY follow-up
+
+A live run on 857 tables showed COPY I/O waits and roughly 5.65 MB/s during observation, while row counters stayed unchanged until the current table finished. The follow-up removes the preliminary source count and combines the target post-count with the existing full revert fingerprint. COPY is bounded to remaining row budget + 1, with overflow rejected before commit. PostgreSQL binary columns now use binary prepared-query results during receipt hashing. Full revert protection remains enabled.
+
+Progress now distinguishes COPY, fingerprinting and commit, shows recent COPY bytes/s, suppresses misleading row ETA in those phases, and records cumulative stage timings in the journal. Independent-table parallel loading and server configuration changes are deferred until database wait/capacity measurements justify them. No production speedup is claimed from the functional regression tests. The separate 1.0.1 Browser distribution is intended for launch after the existing migration finishes; an already-running JVM does not adopt these changes.
+
+The interrupted October 14 Claude session had implemented parallel preparation, partial-preparation recovery, sampled validation and direct PostgreSQL COPY, and stopped while preparing a many-table benchmark. The later session reported expired OAuth authentication. Those assistant failures are distinct from migration job failures.
+
+Continuation fixes: persist and enforce Include data for direct jobs, enforce total rows across committed tables/resume and per-table COPY byte limits, and verify interrupted row/LOB artifacts by SHA-256 before reuse. Older partial records without hashes are re-extracted; older plans without the Include data setting require fresh analysis for direct execution. Staged execution remains compatible.
+
+A 200-table live PostgreSQL fixture also reproduced a Windows AccessDeniedException replacing job.json during execution. Atomic journal replacement now retries transient access denial for a bounded interval, retaining the old journal throughout. Unsupported atomic moves and persistent failures still fail; no database mutation is replayed by this retry. Regression tests cover transient denial, persistent denial, other I/O errors and interruption.
+
+The optional `PostgresTransferTest#manyTablesStagedAndDirectBenchmark` compares one-reader staging, three-reader staging and direct transfer on 200 tables / 20,500 rows, including 600 documents of 32 KiB each. Every mode checks complete source/target value equality. This is a new smaller fixture, not a reproduction of the earlier unrecorded 300 MB document benchmark. It retains the full target fingerprint used for direct-transfer revert receipts.
+
+Reproduce against a disposable PostgreSQL instance with the environment settings in LIVE-DATABASE-CHECKS.md:
+
+```powershell
+mvn -B -ntp verify '-Dmigration.pg.port=55439' '-Dmigration.continuationBenchmark=true'
+```
+
+The benchmark writes `target/benchmarks/continuation-many-tables.json`. UI CI now starts an application for the HTTP-backed bulk-upload test and stops it afterward. The historical pilot/release work below is not declared complete by this continuation.
+
+Local PostgreSQL 16.11 results (one run, Windows / Java 21):
+
+| Mode | Preparation | Preparation + execution |
+| --- | ---: | ---: |
+| Staged, one reader | 11.84 s | 25.07 s |
+| Staged, three readers | 6.01 s | 20.25 s |
+| Direct COPY | 2.50 s | 16.66 s |
+
+All three modes passed independent full-value equality checks. Fixture setup, independent assertions and cleanup are outside these timings. These observations are not production estimates or Oracle performance evidence.
+
+Final validation: `mvn verify` with live PostgreSQL and the continuation benchmark succeeded: 187 tests discovered, 159 passed, 28 skipped (26 Oracle checks and two separate optional scale benchmarks), zero failures/errors. All 17 frontend test scripts and JavaScript syntax checks passed, including the HTTP-backed bulk-upload check. Oracle was not revalidated in this continuation.
+
 Refreshed 2026-10-08 from the current working tree and live Oracle/PostgreSQL checks. Implemented features, validated behavior and remaining work are separated below. Existing packaging/UI changes are included in this review.
 
 ## Next outcome

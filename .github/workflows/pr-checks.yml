@@ -26,9 +26,23 @@ jobs:
         shell: pwsh
         run: Get-ChildItem src/main/resources/static/js/*.js | ForEach-Object { node --check $_.FullName }
 
+      - name: Start application for HTTP-backed UI checks
+        shell: pwsh
+        run: |
+          $jar = (Get-Item target/fg-sql-migration-1.0.0-SNAPSHOT.jar).FullName
+          $app = Start-Process java -ArgumentList @('-jar', $jar, '--migration.work-dir=target/ci-ui-work') -WindowStyle Hidden -PassThru -RedirectStandardOutput target/ci-app.log -RedirectStandardError target/ci-app.err
+          $app.Id | Set-Content target/ci-app.pid
+          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            try { Invoke-RestMethod http://127.0.0.1:8098/api/capabilities | Out-Null; exit 0 } catch { Start-Sleep -Seconds 1 }
+          }
+          Get-Content target/ci-app.log
+          throw 'Application did not become ready'
+
       - name: jsdom-driven frontend logic tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           npm install jsdom --prefix target/ui-test
           node scripts/test-connection-ui.mjs
           node scripts/test-bulk-ui.mjs
@@ -44,3 +58,15 @@ jobs:
           node scripts/test-catalog-unconfigured-ui.mjs
           node scripts/test-excluded-ui.mjs
           node scripts/test-storage-ui.mjs
+          node scripts/test-table-progress-ui.mjs
+          node scripts/test-preparation-poll-ui.mjs
+          node scripts/test-direct-ui.mjs
+
+      - name: Stop UI test application
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path target/ci-app.pid) {
+            $app = Get-Process -Id (Get-Content target/ci-app.pid) -ErrorAction SilentlyContinue
+            if ($app -and $app.ProcessName -eq 'java') { Stop-Process -Id $app.Id }
+          }

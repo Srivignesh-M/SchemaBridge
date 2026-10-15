@@ -30,6 +30,9 @@ public class DatabaseGateway {
         // PostgreSQL materializes every fetched row in memory. Refuse a fetch above a quarter of the heap
         // instead of running out of memory; the driver closes the connection when this happens.
         properties.setProperty("maxResultBuffer", "25percent");
+        // Binary results are used for server-prepared statements (forced for document exports, and automatic after
+        // repeated executions). The driver's text form of a binary time value drops microseconds, so time stays text.
+        if (spec.dialect() == Dialect.POSTGRESQL) properties.setProperty("binaryTransferDisable", "TIME,TIMETZ");
         properties.setProperty("oracle.net.CONNECT_TIMEOUT", "10000"); properties.setProperty("oracle.jdbc.ReadTimeout", "120000");
         MigrationOptions options=OPTIONS.get();
         if(options!=null){properties.setProperty("socketTimeout",options.readTimeoutSeconds().toString());properties.setProperty("oracle.jdbc.ReadTimeout",Long.toString(options.readTimeoutSeconds()*1000L));}
@@ -253,30 +256,58 @@ public class DatabaseGateway {
         }
         return rows;
     }
-    long exportTyped(Connection c,Table source,Table filterTable,TableSelection selection,String schema,Dialect sourceDialect,Dialect targetDialect,
-                     Path path,long limit,MigrationOptions options,TransferProgress progress)throws Exception {
-        long rows=0,bytes=0;List<Object> values=new ArrayList<>();
+    /** What one table's export wrote: its rows, the row file's size and its large-value (LOB) files. */
+    record Export(long rows, long dataBytes, int sidecars, long sidecarBytes) { long stagedBytes() { return dataBytes + sidecarBytes; } }
+    /** Stages one table. Rows are counted against the plan-wide budget, which may be shared by parallel readers;
+     * a failed export hands its rows back so a retry or an excluded table does not use them up. */
+    Export exportTyped(Connection c,Table source,Table filterTable,TableSelection selection,String schema,Dialect sourceDialect,Dialect targetDialect,
+                       Path path,java.util.concurrent.atomic.AtomicLong budget,MigrationOptions options,TransferProgress progress)throws Exception {
+        long rows=0,bytes=0,sidecarBytes=0;int sidecars=0;List<Object> values=new ArrayList<>();
         String query="SELECT "+SqlWriter.names(source.columns().stream().map(Column::name).toList(),sourceDialect)+" FROM "+qualified(schema,source.name(),sourceDialect)+TableProjection.where(filterTable,selection,sourceDialect,values);
+        String sidecarPrefix=SourceExtraction.sidecarPrefix(path);
         Files.createFile(path);checkDisk(path,options);
         try(PreparedStatement statement=c.prepareStatement(query);BufferedWriter writer=Files.newBufferedWriter(path)){
+            // bytea travels as hex text (twice its size) unless the statement is server-prepared, which switches
+            // results to binary. Measured on real documents: about 1.3-2x faster.
+            if(sourceDialect==Dialect.POSTGRESQL&&source.columns().stream().anyMatch(column->column.type().kind().equals("BINARY"))&&statement.isWrapperFor(org.postgresql.PGStatement.class))
+                statement.unwrap(org.postgresql.PGStatement.class).setPrepareThreshold(-1);
             if(selection!=null && selection.rowLimit()!=null)statement.setMaxRows(selection.rowLimit());
             int fetch=options.fetchSize();
             progress.statement=statement;statement.setFetchSize(selection!=null && selection.rowLimit()!=null?Math.min(fetch,selection.rowLimit()):fetch);statement.setQueryTimeout(options.queryTimeoutSeconds());
             for(int i=0;i<values.size();i++)statement.setObject(i+1,values.get(i));
             try(ResultSet rs=readable(statement::executeQuery,source,sourceDialect)){
                 while(readable(rs::next,source,sourceDialect)){
-                    progress.check();if(++rows>limit)throw new RowLimitExceeded();
-                    RowStore.Cell[] row=RowStore.read(rs,source,targetDialect,path.getParent(),options,progress,diskSpaceProbe());
+                    progress.check();
+                    if(budget.decrementAndGet()<0){budget.incrementAndGet();throw new RowLimitExceeded();}
+                    rows++;
+                    RowStore.Cell[] row=RowStore.read(rs,source,targetDialect,path.getParent(),sidecarPrefix,options,progress,diskSpaceProbe());
                     String line=RowStore.JSON.writeValueAsString(row);long length=line.getBytes(java.nio.charset.StandardCharsets.UTF_8).length+1;
-                    for(RowStore.Cell cell:row)if(cell.file()!=null)length+=Files.size(RowStore.sidecar(path.getParent(),cell.file()));
+                    for(RowStore.Cell cell:row)if(cell.file()!=null){long size=Files.size(RowStore.sidecar(path.getParent(),cell.file()));length+=size;sidecars++;sidecarBytes+=size;}
                     bytes+=length;if(bytes>options.maxTableBytes())throw new IllegalArgumentException("Export exceeds configured per-table byte limit");
                     writer.write(line);writer.newLine();progress.rowsRead++;progress.bytes+=length;
                     if(rows%options.fetchSize()==0){writer.flush();checkDisk(path,options);}
                 }
             }
             writer.flush();checkDisk(path,options);
-        }finally{progress.statement=null;}
-        return rows;
+        }catch(Exception|Error failure){budget.addAndGet(rows);throw failure;}
+        finally{progress.statement=null;}
+        return new Export(rows,Files.size(path),sidecars,sidecarBytes);
+    }
+    /** Exports the open transaction's snapshot so other connections read exactly the same data. PostgreSQL only;
+     * null elsewhere. A failed export leaves the transaction aborted, so the caller rolls back and reads alone. */
+    String exportSnapshot(Connection c, Dialect dialect) throws SQLException {
+        if (dialect != Dialect.POSTGRESQL || !c.getMetaData().getDatabaseProductName().equals("PostgreSQL")) return null;
+        try (Statement statement = c.createStatement(); ResultSet rs = statement.executeQuery("SELECT pg_catalog.pg_export_snapshot()")) { rs.next(); return rs.getString(1); }
+    }
+    /** Starts this connection's transaction on another connection's exported snapshot. Must be its first statement. */
+    void importSnapshot(Connection c, String snapshot) throws SQLException {
+        if (snapshot == null) return;
+        try (Statement statement = c.createStatement()) { statement.execute("SET TRANSACTION SNAPSHOT '" + snapshot.replace("'", "''") + "'"); }
+    }
+    /** Several readers are safe where they can share one snapshot (PostgreSQL) and on the H2 test fixture. */
+    boolean parallelReads(Connection c, Dialect dialect) throws SQLException {
+        String product = c.getMetaData().getDatabaseProductName();
+        return dialect == Dialect.POSTGRESQL && (product.equals("PostgreSQL") || product.equals("H2"));
     }
     /** Fetch size for tables with large values. The PostgreSQL driver holds every row of a fetch in memory and
      * row sizes vary widely in document tables, so the fetch stays small instead of adapting to earlier rows. */

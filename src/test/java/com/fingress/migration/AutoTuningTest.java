@@ -95,6 +95,8 @@ class AutoTuningTest {
             long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
             while (Set.of("QUEUED", "RUNNING").contains(job.state()) && System.nanoTime() < end) { Thread.sleep(10); job = service.job(job.id()); }
             assertEquals("SUCCEEDED", job.state(), job.message());
+            assertEquals(2, job.progress().tablesTotal(), "the run counts every selected table");
+            assertEquals(2, job.progress().tablesDone(), "a finished run reports all tables done");
             // Per-table settings survive a restart, so a resumed job keeps them.
             PlanView restored;
             service.close();

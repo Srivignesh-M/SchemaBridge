@@ -40,7 +40,12 @@ public class MigrationController {
     @GetMapping("/jobs") public List<JobView> history(){return service.history();}
     @GetMapping("/storage") public StorageView storage()throws Exception{return service.storage();}
     @PostMapping("/jobs/{id}/cancel") public JobView cancel(@PathVariable String id){return service.cancel(id);}
-    @PostMapping("/jobs/{id}/resume") public JobView resume(@PathVariable String id,@RequestBody ConnectionSpec target){return service.resume(id,target);}
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    /** The body is the target connection, or {target, source} to resume a direct transfer. */
+    @PostMapping("/jobs/{id}/resume") public JobView resume(@PathVariable String id,@RequestBody com.fasterxml.jackson.databind.JsonNode body)throws Exception{
+        if(body!=null&&body.has("target")){ResumeRequest request=JSON.treeToValue(body,ResumeRequest.class);return service.resume(id,request.target(),request.source());}
+        return service.resume(id,JSON.treeToValue(body,ConnectionSpec.class));
+    }
     @PostMapping("/jobs/{id}/revert-preview") public RevertPreview previewRevert(@PathVariable String id,@RequestBody ConnectionSpec target)throws Exception{return service.previewRevert(id,target);}
     @PostMapping("/jobs/{id}/revert") public JobView revert(@PathVariable String id,@RequestBody RevertRequest request){return service.revert(id,request);}
     @PostMapping("/plans/{id}/download-ticket") public Map<String,String> ticket(@PathVariable String id,@RequestBody Map<String,Action> actions){

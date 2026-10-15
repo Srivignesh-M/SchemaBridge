@@ -188,6 +188,16 @@ Jobs run asynchronously on two workers with a bounded queue. The four-connection
 
 Artifact files contain migrated data. Keep the work directory private. Delete plans through `DELETE /api/plans/{id}` after downloading reports; expired inactive plans are cleaned when new plans are created. Orphaned files after restart are not automatically recovered or removed. Use a dedicated work directory and manage its retention.
 
+### Parallel preparation and direct PostgreSQL transfer
+
+PostgreSQL preparation uses up to three readers on a shared snapshot. Connection loss retries the affected table on a new snapshot; the report warns when tables represent different source times. Completed tables from interrupted preparation can be reused with the same selection. Recovery checks SHA-256 hashes of row and LOB files; older partial records without hashes are read again. Cancelled preparation is discarded.
+
+PostgreSQL-to-PostgreSQL execution can use `direct: true` with a `source` connection in the execute request. This streams COPY without local staging and supports new tables without row filters. The saved **Include data** setting still applies. Total-row limits include earlier committed tables, including after restart/resume; per-table byte limits measure COPY wire bytes, including its framing. A limit failure rolls back the current table and retains earlier commits. Source credentials are not journaled; resuming direct transfer requires both source and target connections.
+
+Direct transfers verify row counts and save a full target fingerprint for safe revert. That receipt requires a full target read and is included in execution time. Staged tables above 1 GB use row counts plus primary-key sampling; tables without a suitable key use counts only. Sampling provides less content coverage than a full fingerprint.
+
+Direct COPY now reads at most the remaining row budget plus one, checks the COPY result before committing, and rolls back on overflow. There is no preliminary source count scan. One target fingerprint pass supplies both the exact post-load count and the revert receipt; binary columns use PostgreSQL binary results to avoid hex expansion. Progress separates COPY, receipt verification and commit, displays recent COPY bytes/s, and retains cumulative stage timings. COPY row totals still update at table completion; the UI states this and suppresses row-based ETA during these phases. Transfers remain sequential; increasing parallelism requires measuring source/target I/O capacity first.
+
 ## API
 
 All write requests require `Content-Type: application/json` and `X-Migration-Client: migration-ui`.

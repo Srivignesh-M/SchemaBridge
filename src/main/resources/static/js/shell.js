@@ -23,7 +23,7 @@ async function navigateToPage(pageId){
       if (jobBusy(SchemaBridgeState.migration.finalJob)) pollJob();
     } catch (e) { error(e.message); }
   }
-  if (pageId === 'migration') ensureCatalogLoaded();
+  if (pageId === 'migration') { ensureCatalogLoaded(); if (SchemaBridgeState.migration.preparationId && !SchemaBridgeState.migration.preparationPoll) pollPreparation(); }
   if (pageId === 'dashboard') await renderDashboard();
   if (pageId === 'history') await refreshHistory();
   if (pageId === 'storage') await refreshStorage();

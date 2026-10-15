@@ -80,6 +80,7 @@ class TransferFeaturesTest {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(30);
         while(Set.of("QUEUED","PREPARING").contains(p.state())&&System.nanoTime()<end){Thread.sleep(10);p=service.preparation(p.id());}
         assertEquals("READY",p.state(),p.message());assertEquals(110000,p.progress().rowsRead());assertEquals(110000,p.plan().tables().getFirst().rows());
+        assertEquals(1,p.progress().tablesTotal());
     }
     PreparationView awaitPreparation(PreparationView p)throws Exception {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(30);
@@ -167,13 +168,56 @@ class TransferFeaturesTest {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");
         var exhausted=new DatabaseGateway(){
             @Override public Connection connect(ConnectionSpec spec)throws SQLException{return db.connect(spec);}
-            @Override long exportTyped(Connection c,Table source,Table filterTable,TableSelection selection,String schema,Dialect sourceDialect,Dialect targetDialect,Path path,long limit,MigrationOptions options,TransferProgress progress){throw new OutOfMemoryError("simulated");}
+            @Override DatabaseGateway.Export exportTyped(Connection c,Table source,Table filterTable,TableSelection selection,String schema,Dialect sourceDialect,Dialect targetDialect,Path path,java.util.concurrent.atomic.AtomicLong budget,MigrationOptions options,TransferProgress progress){throw new OutOfMemoryError("simulated");}
         };
         service.close();Path work=Files.createDirectories(directory.resolve("oom"));service=new MigrationService(exhausted,json,work.toString(),2_000_000,30);
         PreparationView p=awaitPreparation(service.prepare(request(false,Map.of(),MigrationOptions.defaults())));
         assertEquals("FAILED",p.state());assertTrue(p.message().startsWith("Ran out of memory on items"),p.message());
         try(var leftovers=Files.list(work)){assertTrue(leftovers.noneMatch(Files::isDirectory),"The partial plan folder must be removed");}
         assertEquals("READY",awaitPreparation(service.prepare(request(true,Map.of(),MigrationOptions.defaults()))).state(),"The service must keep working after a failure");
+    }
+    /** A gateway whose source connection drops while table "b" is being read, after its files are partly written. */
+    DatabaseGateway dropping(String sqlState,int drops,int[] connects,int[] reachableAfter){
+        return new DatabaseGateway(){
+            int dropsLeft=drops;
+            @Override public Connection connect(ConnectionSpec spec)throws SQLException{
+                if(spec.host().equals("source")){connects[0]++;if(connects[0]>1&&connects[0]<=reachableAfter[0])throw new SQLException("Connection refused","08001");}
+                return db.connect(spec);
+            }
+            @Override DatabaseGateway.Export exportTyped(Connection c,Table source,Table filterTable,TableSelection selection,String schema,Dialect sourceDialect,Dialect targetDialect,Path path,java.util.concurrent.atomic.AtomicLong budget,MigrationOptions options,TransferProgress progress)throws Exception{
+                DatabaseGateway.Export export=super.exportTyped(c,source,filterTable,selection,schema,sourceDialect,targetDialect,path,budget,options,progress);
+                if(source.name().in(sourceDialect).equals("b")&&dropsLeft-->0)throw new SQLException("An I/O error occurred while sending to the backend",sqlState);
+                return export;
+            }
+        };
+    }
+    PlanRequest abc(){return new PlanRequest(Dialect.POSTGRESQL,Dialect.POSTGRESQL,"public",null,source,"public",List.of("a","b","c"),true,null,MigrationOptions.defaults(),Map.of(),false);}
+    void abcTables()throws Exception{sql(sourceUrl,"CREATE TABLE a(id INTEGER PRIMARY KEY); INSERT INTO a VALUES(1);"
+            +"CREATE TABLE b(id INTEGER PRIMARY KEY, doc BYTEA); INSERT INTO b VALUES(1, X'"+"AB".repeat(10_000)+"'),(2,NULL);"
+            +"CREATE TABLE c(id INTEGER PRIMARY KEY); INSERT INTO c VALUES(1),(2),(3)");}
+    @Test void lostSourceConnectionResumesFromTheCurrentTable()throws Exception {
+        abcTables();long[] saved=SourceExtraction.RECONNECT_DELAYS_MS;SourceExtraction.RECONNECT_DELAYS_MS=new long[]{10,10,10};int readers=SourceExtraction.MAX_READERS;SourceExtraction.MAX_READERS=1;
+        try{
+            int[] connects={0},reachableAfter={2};   // the first reconnect attempt fails too, the second succeeds
+            service.close();Path work=Files.createDirectories(directory.resolve("reconnect"));service=new MigrationService(dropping("08006",1,connects,reachableAfter),json,work.toString(),2_000_000,30);
+            PlanView plan=service.create(abc());
+            assertEquals(List.of("a","b","c"),plan.tables().stream().map(TableReport::table).toList(),plan.excluded().toString());
+            assertEquals(List.of(1L,2L,3L),plan.tables().stream().map(TableReport::rows).toList());
+            assertEquals(3,connects[0],"initial connection, one failed reconnect, one successful reconnect");
+            assertTrue(plan.warnings().stream().anyMatch(w->w.contains("source connection was lost 1 time")),plan.warnings().toString());
+            try(var files=Files.list(work.resolve(plan.id()))){assertEquals(1,files.filter(f->f.getFileName().toString().startsWith("lob-")).count(),"the partial attempt's document file must be removed");}
+        }finally{SourceExtraction.RECONNECT_DELAYS_MS=saved;SourceExtraction.MAX_READERS=readers;}
+    }
+    @Test void otherDatabaseErrorsAndLongOutagesStillFail()throws Exception {
+        abcTables();long[] saved=SourceExtraction.RECONNECT_DELAYS_MS;SourceExtraction.RECONNECT_DELAYS_MS=new long[]{10,10};int readers=SourceExtraction.MAX_READERS;SourceExtraction.MAX_READERS=1;
+        try{
+            service.close();service=new MigrationService(dropping("42P01",1,new int[]{0},new int[]{0}),json,directory.resolve("other").toString(),2_000_000,30);
+            assertEquals("42P01",assertThrows(SQLException.class,()->service.create(abc())).getSQLState(),"non-connection errors are not retried");
+            int[] connects={0};
+            service.close();service=new MigrationService(dropping("08006",1,connects,new int[]{99}),json,directory.resolve("outage").toString(),2_000_000,30);
+            assertEquals("08001",assertThrows(SQLException.class,()->service.create(abc())).getSQLState(),"gives up after the last attempt");
+            assertEquals(3,connects[0],"initial connection plus one attempt per delay");
+        }finally{SourceExtraction.RECONNECT_DELAYS_MS=saved;SourceExtraction.MAX_READERS=readers;}
     }
     @Test void migrationOptionsDefaultLegacySettingsToVersionOneAndRejectUnknownVersions()throws Exception {
         MigrationOptions legacy=json.readValue("{\"maxRows\":500}",MigrationOptions.class);
@@ -212,7 +256,7 @@ class TransferFeaturesTest {
     }
     @Test void uncertainRestartCannotBeReplayedAndWorkFolderHasExclusiveOwner()throws Exception {
         assertThrows(java.io.IOException.class,()->new MigrationService(db,json,directory.toString(),100,30));
-        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");PlanView p=plan();assertTrue(p.warnings().stream().anyMatch(w->w.contains("extraction cannot resume")));JobView job=run(p,Action.CREATE_AND_LOAD);assertEquals(1,job.progress().rowsCommitted());service.close();
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");PlanView p=plan();assertTrue(p.warnings().stream().anyMatch(w->w.contains("continues from the tables already staged")));JobView job=run(p,Action.CREATE_AND_LOAD);assertEquals(1,job.progress().rowsCommitted());service.close();
         Path manifest=directory.resolve(p.id()).resolve("job.json");var node=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(Files.readString(manifest));((com.fasterxml.jackson.databind.node.ObjectNode)node.get("view")).put("state","RUNNING");Files.writeString(manifest,json.writeValueAsString(node));
         service=new MigrationService(db,json,directory.toString(),100,30);JobView recovered=service.job(job.id());assertEquals("RECOVERY_REQUIRED",recovered.state());assertEquals(1,recovered.progress().rowsCommitted());assertFalse(recovered.resumable());assertThrows(IllegalArgumentException.class,()->service.resume(job.id(),target));assertEquals(1,count("items"));
     }
