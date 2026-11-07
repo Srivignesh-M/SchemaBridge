@@ -58,7 +58,7 @@
   </section>
   <section id="historyPage" class="app-page" hidden>
     <div class="section-heading"><h2>History</h2></div>
-    <section class="card" aria-labelledby="historyTitle"><div class="section-title"><h2 id="historyTitle">Saved migration history</h2><button id="refreshHistory" class="secondary" type="button">Refresh history</button></div><p class="muted">History loads automatically. Passwords are not saved. Interrupted jobs with an uncertain commit require target reconciliation.</p><p id="jobHistoryStatus" class="history-status" role="status" aria-live="polite"></p><div id="jobHistory" class="history-list" role="list" aria-label="Saved migrations"></div></section>
+    <section class="card" aria-labelledby="historyTitle"><div class="section-title"><h2 id="historyTitle">Saved migration history</h2><button id="refreshHistory" class="secondary" type="button">Refresh history</button></div><p class="muted">History loads automatically. New migration history retains connections and passwords locally for resuming; older entries may require credentials. Interrupted jobs with an uncertain commit require target reconciliation.</p><p id="jobHistoryStatus" class="history-status" role="status" aria-live="polite"></p><div id="jobHistory" class="history-list" role="list" aria-label="Saved migrations"></div></section>
   </section>
   <section id="storagePage" class="app-page" hidden>
     <div class="section-heading"><h2>Storage</h2></div>
@@ -69,7 +69,7 @@
   </section>
   <section id="settingsPage" class="app-page" hidden>
     <div class="section-heading"><h2>Settings</h2></div>
-    <section class="card"><div class="section-title"><h2>Export / import settings</h2></div><p class="muted">Download the current dialects, connection host/port/database/username, target schema and transfer settings as a local JSON file — never passwords. Nothing is stored on the server; this is not a saved-connections manager. Re-enter passwords after importing.</p><div class="action-bar"><button type="button" id="exportSettings" class="secondary">Export settings</button><label class="upload">Import settings<input id="importSettings" type="file" accept="application/json"></label></div></section>
+    <section class="card"><div class="section-title"><h2>Export / import settings</h2></div><p class="muted">Download the current dialects, connection host/port/database/username, target schema and transfer settings as a local JSON file — never passwords. Settings exports omit passwords. Migration history separately retains connections and passwords for resuming saved jobs. Re-enter passwords after importing settings.</p><div class="action-bar"><button type="button" id="exportSettings" class="secondary">Export settings</button><label class="upload">Import settings<input id="importSettings" type="file" accept="application/json"></label></div></section>
     <section class="card"><h2>About</h2><p class="muted">SchemaBridge · Local single-user application · <span id="buildVersion">Loading version…</span> · Credentials are kept out of reports</p></section>
   </section>
   <main id="migrationPage" class="app-page">

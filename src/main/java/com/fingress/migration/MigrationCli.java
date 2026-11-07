@@ -108,7 +108,7 @@ public final class MigrationCli {
             if(Files.exists(result.resolve("migration.zip")))try(OutputStream zip=Files.newOutputStream(result.resolve("migration.zip"))) {service.download(plan.id(),actions,zip);}
             out.println(job.message());return job.state().equals("SUCCEEDED")?0:3;
         } finally {
-            service.close();out.println("Durable plan/job data retained at "+work+". Use history/resume with --work-dir; credentials are not retained.");
+            service.close();out.println("Durable plan/job data retained at "+work+". Use history/resume with --work-dir; connection credentials are retained in local history.");
         }
     }
     private void writeJson(Path file,Object value) throws IOException {Files.writeString(file,json.writerWithDefaultPrettyPrinter().writeValueAsString(value));}

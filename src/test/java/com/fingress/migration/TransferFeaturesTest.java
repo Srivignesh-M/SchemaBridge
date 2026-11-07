@@ -36,6 +36,35 @@ class TransferFeaturesTest {
         throw new AssertionError("Job timed out: "+job);
     }
     JobView run(PlanView plan,Action action)throws Exception {assertTrue(plan.issues().isEmpty(),plan.issues().toString());return await(service.execute(plan.id(),new ExecuteRequest(target,Map.of("items",action))));}
+    @Test void historyRestoresCredentialsAcrossRestartAndSupportsOlderEntries()throws Exception {
+        sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");
+        sql(targetUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");
+        PlanView plan=plan();
+        JobView failed=run(plan,Action.DML_ONLY);
+        assertEquals("FAILED",failed.state());
+        service.close();service=new MigrationService(db,json,directory.toString(),2_000_000,30);
+        assertEquals(source,service.savedConnections(failed.id()).source());
+        assertEquals(target,service.savedConnections(failed.id()).target());
+        assertFalse(json.writeValueAsString(service.history()).contains("private-secret"));
+        assertFalse(json.writeValueAsString(service.view(plan.id())).contains("private-secret"));
+        // Simulate an entry written before credentials were retained.
+        service.close();
+        Path manifest=directory.resolve(plan.id()).resolve("plan.json");
+        var saved=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(Files.readString(manifest));
+        saved.remove(List.of("sourceConnection","targetConnection"));json.writeValue(manifest.toFile(),saved);
+        service=new MigrationService(db,json,directory.toString(),2_000_000,30);
+        assertNull(service.savedConnections(failed.id()).target());
+        assertNull(service.savedConnections(failed.id()).source());
+        ConnectionSpec updated=new ConnectionSpec(target.dialect(),target.host(),target.port(),target.database(),target.username(),"new-password");
+        assertEquals("FAILED",await(service.resume(failed.id(),updated,source)).state());
+        service.close();service=new MigrationService(db,json,directory.toString(),2_000_000,30);
+        assertEquals(updated,service.savedConnections(failed.id()).target());
+        assertEquals(source,service.savedConnections(failed.id()).source());
+        sql(targetUrl,"DELETE FROM items");
+        var restored=service.savedConnections(failed.id());
+        assertEquals("SUCCEEDED",await(service.resume(failed.id(),restored.target(),restored.source())).state());
+        assertEquals(1,count("items"));
+    }
     @Test void multipleBooleanFiltersAndOptionalRowLimit()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY, active BOOLEAN DEFAULT FALSE, label VARCHAR(100)); INSERT INTO items VALUES(1,TRUE,'keep'),(2,FALSE,'keep'),(3,TRUE,'keep'),(4,TRUE,'other')");
         var filters=List.of(new RowFilter("active","=","true"),new RowFilter("label","=","keep"));
@@ -243,7 +272,7 @@ class TransferFeaturesTest {
         var out=new java.io.ByteArrayOutputStream();service.download(p.id(),Map.of("items",Action.CREATE_AND_LOAD),out);
         try(var zip=new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(out.toByteArray()))){java.util.zip.ZipEntry entry;boolean found=false;while((entry=zip.getNextEntry())!=null){if(entry.getName().endsWith("02-data.sql")){assertTrue(new String(zip.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8).contains(text.replace("'","''")));found=true;}}assertTrue(found);}
     }
-    @Test void durableResumeSkipsCommittedTablesAndNeverPersistsPasswords()throws Exception {
+    @Test void durableResumeRetainsCredentialsOutsideJobReports()throws Exception {
         sql(sourceUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1),(2)");sql(targetUrl,"CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)");
         MigrationOptions options=new MigrationOptions(50L,1_000_000L,0L,25,7,4096L,321,654,true,false);
         PlanView p=service.create(request(false,Map.of(),options));assertEquals(options,p.options());
@@ -252,7 +281,9 @@ class TransferFeaturesTest {
         assertEquals(1,service.history().size());assertTrue(service.job(job.id()).resumable());assertEquals(options,service.job(job.id()).options());assertEquals(options,service.view(p.id()).options());
         sql(targetUrl,"DELETE FROM items");job=await(service.resume(job.id(),target));assertEquals("SUCCEEDED",job.state(),job.message());assertEquals(2,count("items"));
         String id=job.id();assertThrows(IllegalArgumentException.class,()->service.resume(id,target));
-        for(String file:List.of("plan.json","job.json"))assertFalse(Files.readString(directory.resolve(p.id()).resolve(file)).contains("private-secret"));
+        assertEquals(source,service.savedConnections(job.id()).source());
+        assertEquals(target,service.savedConnections(job.id()).target());
+        assertFalse(Files.readString(directory.resolve(p.id()).resolve("job.json")).contains("private-secret"));
     }
     @Test void uncertainRestartCannotBeReplayedAndWorkFolderHasExclusiveOwner()throws Exception {
         assertThrows(java.io.IOException.class,()->new MigrationService(db,json,directory.toString(),100,30));

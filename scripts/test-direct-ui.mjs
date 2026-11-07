@@ -4,6 +4,8 @@ import {createRequire} from 'node:module';
 const require=createRequire(new URL('../target/ui-test/package.json',import.meta.url)),{JSDOM}=require('jsdom');
 const dom=new JSDOM(await readFile(new URL('../src/main/resources/static/index.html',import.meta.url),'utf8'),{url:'http://localhost:8098',runScripts:'outside-only'});
 const {window}=dom,requests=[];
+window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+window.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new window.Event('close'));};
 window.fetch=async(path,options={})=>{requests.push({path,body:options.body?JSON.parse(options.body):null});
   const job={id:'job1',planId:'plan1',state:'FAILED',tables:[],progress:{},resumable:true,direct:true,message:'Source table gone'};
   const data=path.endsWith('/execute')||path.endsWith('/resume')||path==='/api/jobs/job1'?job:path.endsWith('/jobs')?[]:path==='/api/storage'?{plans:[],orphanedDirectories:[]}:{};
@@ -35,11 +37,71 @@ try{
   const run=requests.find(r=>r.path==='/api/plans/plan1/execute');
   assert.equal(run.body.direct,true);assert.deepEqual(run.body.source,source);assert.deepEqual(run.body.actions,{items:'CREATE_AND_LOAD'});
   // A failed direct job resumes with both connections.
-  assert.equal(el('resumeJob').hidden,false);assert.equal(el('resumeJob').textContent,'Resume with current source and target connections');
+  assert.equal(el('resumeJob').hidden,false);assert.equal(el('resumeJob').textContent,'Resume migration');
   el('sourceUsername').value='reader';el('sourceDatabase').value='postgres';el('resumeJob').click();await settle();
+  assert.equal(requests.some(r=>r.path.endsWith('/resume')),false,'opening resume waits for credentials');
+  el('resumeConnections').querySelector('[type="submit"]').click();await settle();
   const resume=requests.find(r=>r.path==='/api/jobs/job1/resume');
   assert.ok(resume.body.target&&resume.body.source,'direct resume sends {target, source}');
   assert.equal(resume.body.source.username,'reader');
+
+  // History in a fresh browser has no credentials. Supply them without invalidating its plan.
+  el('sourceUsername').value='';el('targetUsername').value='';
+  const savedPlan=m.plan;
+  el('resumeJob').click();await settle();
+  const dialog=el('resumeConnections'),sets=dialog.querySelectorAll('fieldset');
+  assert.equal(sets.length,2);
+  sets[0].querySelector('[name="username"]').value='history-reader';
+  sets[1].querySelector('[name="username"]').value='history-writer';
+  for(const set of sets){set.querySelector('[name="password"]').value='restored-password';set.querySelector('[name="username"]').dispatchEvent(new window.Event('input',{bubbles:true}));}
+  dialog.querySelector('[type="submit"]').click();await settle();
+  const restored=requests.filter(r=>r.path.endsWith('/resume')).at(-1);
+  assert.equal(restored.body.source.username,'history-reader');
+  assert.equal(restored.body.target.username,'history-writer');
+  assert.equal(restored.body.target.password,'restored-password');
+  assert.equal(m.plan,savedPlan,'credential entry preserves the saved migration');
+  assert.equal(el('resumeConnections'),null,'dialog credentials are removed after submission');
+  // Staged jobs only need the target. Cancelling must never submit a resume.
+  m.finalJob.direct=false;
+  const attempts=requests.filter(r=>r.path.endsWith('/resume')).length;
+  el('resumeJob').click();await settle();
+  assert.equal(el('resumeConnections').querySelectorAll('fieldset').length,1);
+  el('resumeConnections').querySelector('[data-cancel]').click();
+  assert.equal(requests.filter(r=>r.path.endsWith('/resume')).length,attempts);
+
+  // A saved datasource supplies credentials, including a special JDBC URL.
+  const originalFetch=window.fetch;
+  window.fetch=async(path,options)=>{
+    if(path==='/api/datasources')return {ok:true,json:async()=>({configured:true,datasources:[{id:7,name:'Saved target',supported:true}]})};
+    if(path==='/api/datasources/7/select')return {ok:true,json:async()=>({connection:{...source,username:'catalog-user',password:'catalog-password',jdbcUrl:'jdbc:postgresql://source-db:5432/postgres'}})};
+    return originalFetch(path,options);
+  };
+  el('resumeJob').click();await settle();
+  const catalog=el('resumeConnections').querySelector('[data-catalog]');
+  catalog.value='7';catalog.dispatchEvent(new window.Event('change'));await settle();
+  el('resumeConnections').querySelector('[type="submit"]').click();await settle();
+  const selected=requests.filter(r=>r.path.endsWith('/resume')).at(-1);
+  assert.equal(selected.body.username,'catalog-user');
+  assert.equal(selected.body.password,'catalog-password');
+  assert.equal(selected.body.jdbcUrl,'jdbc:postgresql://source-db:5432/postgres');
+  assert.equal(selected.body.source,undefined,'staged resume sends only the target connection');
+  window.fetch=originalFetch;
+
+  // Saved history credentials override unrelated or empty current form values.
+  window.fetch=async(path,options)=>path.endsWith('/connections')
+    ?{ok:true,json:async()=>({source:{...source,password:'saved-source-password'},target:{...source,host:'saved-target',password:'saved-target-password'}})}
+    :originalFetch(path,options);
+  m.finalJob.direct=true;
+  el('resumeJob').click();await settle();
+  const restoredFields=el('resumeConnections').querySelectorAll('fieldset');
+  assert.equal(restoredFields[0].querySelector('[name="password"]').value,'saved-source-password');
+  assert.equal(restoredFields[1].querySelector('[name="password"]').value,'saved-target-password');
+  assert.equal(restoredFields[1].querySelector('[name="host"]').value,'saved-target');
+  el('resumeConnections').querySelector('[type="submit"]').click();await settle();
+  const savedRequest=requests.filter(r=>r.path.endsWith('/resume')).at(-1);
+  assert.equal(savedRequest.body.source.password,'saved-source-password');
+  assert.equal(savedRequest.body.target.password,'saved-target-password');
+  window.fetch=originalFetch;
 
   // Not offered for other combinations or without the analysed source.
   m.finalJob=null;m.plan=plan('ORACLE','POSTGRESQL');window.renderPlan();

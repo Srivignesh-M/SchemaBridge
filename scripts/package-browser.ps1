@@ -45,7 +45,7 @@ if not exist "%DATA_DIR%\logs" mkdir "%DATA_DIR%\logs"
 if not exist "%DATA_DIR%\work" mkdir "%DATA_DIR%\work"
 echo Starting SchemaBridge. When it is ready, open http://localhost:8098 in your browser.
 echo Keep this window open. Press Ctrl+C to stop the local server.
-"runtime\bin\java.exe" -XX:MaxRAMPercentage=50 -jar "$jarName" "--migration.work-dir=%DATA_DIR%\work" "--logging.file.name=%DATA_DIR%\logs\application.log"
+"runtime\bin\java.exe" -XX:MaxRAMPercentage=50 -jar "$jarName" "--migration.work-dir=%DATA_DIR%\work" "--logging.file.name=%DATA_DIR%\logs\application.log" "--spring.config.additional-location=optional:file:%DATA_DIR%\catalog-local.properties"
 "@ | Set-Content -LiteralPath (Join-Path $package 'Start SchemaBridge.bat') -Encoding ASCII
     @'
 SchemaBridge browser edition
@@ -55,6 +55,8 @@ SchemaBridge browser edition
 3. Keep the command window open while using the application. Press Ctrl+C there to stop it.
 
 Migration history, staged data and logs are stored in %LOCALAPPDATA%\Fingress SQL Migration. To use another drive, set the SCHEMABRIDGE_DATA_DIR environment variable (for example: setx SCHEMABRIDGE_DATA_DIR "D:\SchemaBridge-data"), move the existing folder's contents there, and start the application again. Staged data for large migrations can need as much space as the source tables. The application listens on this computer only. Wait for active migrations to finish before stopping the server; committed work can remain after an interruption.
+
+For saved LCNC datasources, place catalog-local.properties in that data folder. Configure migration.catalog.url, migration.catalog.username, migration.catalog.password and migration.catalog.schema. The launcher loads this file across package upgrades. Keep it private; it contains the catalogue database password and is not included in this ZIP. Restart the app after changing it.
 
 This package includes Java. It requires 64-bit Windows and a current Microsoft Edge WebView2 Runtime is not required for this browser edition. Use a supported desktop package if you want the application in its own window.
 '@ | Set-Content -LiteralPath (Join-Path $package 'README.txt') -Encoding UTF8

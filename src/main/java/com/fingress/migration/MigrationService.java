@@ -23,6 +23,7 @@ public class MigrationService implements AutoCloseable {
         final AtomicBoolean executed = new AtomicBoolean(); String targetIdentity; volatile String jobId; Path directory;
         ScriptConverter.Result script;
         String sourceInfo, targetInfo, sourceSchema, sourceTables;
+        ConnectionSpec sourceConnection, targetConnection;
         MigrationOptions options; boolean prepared=true;
         final Set<String> typed = new HashSet<>(); final Map<String,String> hashes = new LinkedHashMap<>();
         final Map<String,String> excluded = new LinkedHashMap<>();
@@ -56,7 +57,7 @@ public class MigrationService implements AutoCloseable {
         final Map<String,String> targetObjectIds = new HashMap<>();
         volatile Revert revert;
         volatile boolean uncertain; int attempt=1;
-        /** A direct transfer streams from the source; its connection (with password) lives only in memory. */
+        /** A direct transfer streams from the source; its active source connection is restored from the saved plan on resume. */
         boolean direct; volatile ConnectionSpec source; final Map<String,Long> loadedRows=new ConcurrentHashMap<>();
         JobView view() { return new JobView(id,state,List.copyOf(tables),message,planId,progress.view(),revert==null&&!uncertain&&Set.of("FAILED","CANCELLED").contains(state),options,revert==null?null:revert.view(),direct); }
     }
@@ -133,6 +134,7 @@ public class MigrationService implements AutoCloseable {
         finally { activePreparations.remove(id); }
     }
     private PlanView createInternal(PlanRequest request, Plan plan, String id) throws Exception {
+        plan.sourceConnection=request.source();plan.targetConnection=request.target();
         plan.auto=request.options()==null;
         plan.options=plan.auto?AutoTuning.global(work,request.targetDialect()):request.options();
         DatabaseGateway.configure(plan.options);
@@ -498,6 +500,7 @@ public class MigrationService implements AutoCloseable {
         if (!plan.executed.compareAndSet(false, true)) throw new IllegalArgumentException("This plan has already been submitted. Analyse again to avoid replaying committed data");
         Job job = new Job(); job.planId=id;job.actions=actions;job.options=plan.options;job.direct=request.direct();job.source=request.source();
         job.progress.totalRows=(job.direct?plan.estimatedRows:plan.rows).entrySet().stream().filter(e->actions.get(e.getKey())!=null&&actions.get(e.getKey())!=Action.SKIP).mapToLong(Map.Entry::getValue).sum();
+        plan.targetConnection=request.target();if(request.source()!=null)plan.sourceConnection=request.source();
         jobs.put(job.id, job); plan.jobId = job.id; checkpoint(plan,job);
         try { executor.execute(() -> run(plan, request.target(), actions, job)); }
         catch (RejectedExecutionException e) { jobs.remove(job.id); plan.jobId=null;plan.executed.set(false);persistPlanUnchecked(plan); throw new IllegalArgumentException("Worker queue full; try again later"); }
@@ -795,11 +798,17 @@ public class MigrationService implements AutoCloseable {
     public synchronized JobView job(String id) { Job job = jobs.get(id); if (job == null) throw new IllegalArgumentException("Job not found"); return job.view(); }
     public synchronized List<JobView> history(){return jobs.values().stream().map(Job::view).sorted(Comparator.comparing(JobView::id)).toList();}
     public JobView cancel(String id){Job job=jobs.get(id);if(job==null)throw new IllegalArgumentException("Job not found");requestCancel(job.revert!=null&&Set.of("QUEUED","RUNNING").contains(job.revert.state)?job.revert.progress:job.progress);return job.view();}
+    /** Credentials are fetched only for a selected job, never included in reports or history lists. */
+    public synchronized ResumeRequest savedConnections(String id){
+        Job job=jobs.get(id);if(job==null)throw new IllegalArgumentException("Job not found");
+        Plan plan=plan(job.planId);return new ResumeRequest(plan.targetConnection,plan.sourceConnection);
+    }
     public JobView resume(String id,ConnectionSpec target){return resume(id,target,null);}
     public synchronized JobView resume(String id,ConnectionSpec target,ConnectionSpec source){
         Job job=jobs.get(id);if(job==null||!job.view().resumable())throw new IllegalArgumentException("This job cannot be automatically resumed. Reconcile uncertain target changes first.");
         Plan plan=plan(job.planId);if(target==null||!identity(target).equals(plan.targetIdentity))throw new IllegalArgumentException("Enter the original target connection to resume");
         if(job.direct){if(source==null||!identity(source).equals(plan.sourceIdentity))throw new IllegalArgumentException("Enter the original source connection to resume this direct transfer");job.source=source;}
+        plan.targetConnection=target;if(source!=null)plan.sourceConnection=source;
         job.progress.cancel=false;job.progress.finished=0;job.progress.started=System.currentTimeMillis();job.progress.rowsSent=job.progress.rowsCommitted;job.attempt++;job.state="QUEUED";checkpoint(plan,job);
         try{executor.execute(()->run(plan,target,job.actions,job));}catch(RejectedExecutionException e){job.state="FAILED";checkpoint(plan,job);throw new IllegalArgumentException("Worker queue full");}return job.view();
     }
@@ -983,7 +992,7 @@ public class MigrationService implements AutoCloseable {
     record PlanManifest(int version,PlanView view,List<Table> tables,Map<String,String> data,Map<String,Table> targetTables,
             Map<String,Long> rows,Set<String> typed,Map<String,String> hashes,MigrationOptions options,String targetIdentity,
             String sourceInfo,String targetInfo,String sourceSchema,String sourceTables,String jobId,boolean executed,
-            Map<String,Long> stagedBytes,Map<String,String> sources,Map<String,TableSelection> selections,String sourceIdentity,Boolean includeData) {}
+            Map<String,Long> stagedBytes,Map<String,String> sources,Map<String,TableSelection> selections,String sourceIdentity,Boolean includeData,ConnectionSpec sourceConnection,ConnectionSpec targetConnection) {}
     record JobManifest(int version,JobView view,Map<String,Action> actions,Set<String> created,Set<String> committed,Set<String> finalized,
                        Map<String,ValidationReport> validations,boolean uncertain,int attempt,Map<String,DataFingerprint> createdFingerprints,Map<String,String> targetObjectIds,RevertManifest revert,
                        boolean direct,Map<String,Long> loadedRows) {}
@@ -1015,7 +1024,7 @@ public class MigrationService implements AutoCloseable {
     private void persistPlan(Plan plan)throws IOException{
         Map<String,String> data=new LinkedHashMap<>();plan.data.forEach((key,path)->data.put(key,path.getFileName().toString()));
         atomicJson(plan.directory.resolve("plan.json"),new PlanManifest(1,plan.view,plan.tables,data,plan.targetTables,plan.rows,plan.typed,plan.hashes,plan.options,plan.targetIdentity,
-                plan.sourceInfo,plan.targetInfo,plan.sourceSchema,plan.sourceTables,plan.jobId,plan.executed.get(),plan.stagedBytes,plan.sources,plan.selections,plan.sourceIdentity,plan.includeData));
+                plan.sourceInfo,plan.targetInfo,plan.sourceSchema,plan.sourceTables,plan.jobId,plan.executed.get(),plan.stagedBytes,plan.sources,plan.selections,plan.sourceIdentity,plan.includeData,plan.sourceConnection,plan.targetConnection));
     }
     private void persistPlanUnchecked(Plan plan){try{persistPlan(plan);}catch(IOException e){throw new IllegalStateException("Could not save plan state",e);}}
     private void checkpoint(Plan plan,Job job){
@@ -1051,6 +1060,7 @@ public class MigrationService implements AutoCloseable {
                     plan.targetIdentity=saved.targetIdentity();plan.sourceInfo=saved.sourceInfo();plan.targetInfo=saved.targetInfo();plan.sourceSchema=saved.sourceSchema();plan.sourceTables=saved.sourceTables();plan.jobId=saved.jobId();plan.executed.set(saved.executed());
                     if(saved.stagedBytes()!=null)plan.stagedBytes.putAll(saved.stagedBytes());if(saved.sources()!=null)plan.sources.putAll(saved.sources());
                     if(saved.selections()!=null)plan.selections.putAll(saved.selections());plan.sourceIdentity=saved.sourceIdentity();plan.includeData=saved.includeData();
+                    plan.sourceConnection=saved.sourceConnection();plan.targetConnection=saved.targetConnection();
                     plans.put(plan.view.id(),plan);
                     if(plan.jobId!=null){
                         Job job=new Job();job.id=plan.jobId;job.planId=plan.view.id();job.options=plan.options;

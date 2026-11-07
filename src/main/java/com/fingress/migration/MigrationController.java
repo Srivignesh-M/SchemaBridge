@@ -41,6 +41,10 @@ public class MigrationController {
     @GetMapping("/storage") public StorageView storage()throws Exception{return service.storage();}
     @PostMapping("/jobs/{id}/cancel") public JobView cancel(@PathVariable String id){return service.cancel(id);}
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    @PostMapping(value="/jobs/{id}/connections",consumes="application/json")
+    public ResumeRequest savedConnections(@PathVariable String id,HttpServletResponse response){
+        response.setHeader("Cache-Control","no-store");return service.savedConnections(id);
+    }
     /** The body is the target connection, or {target, source} to resume a direct transfer. */
     @PostMapping("/jobs/{id}/resume") public JobView resume(@PathVariable String id,@RequestBody com.fasterxml.jackson.databind.JsonNode body)throws Exception{
         if(body!=null&&body.has("target")){ResumeRequest request=JSON.treeToValue(body,ResumeRequest.class);return service.resume(id,request.target(),request.source());}
